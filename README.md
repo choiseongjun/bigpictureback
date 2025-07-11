@@ -11,12 +11,23 @@ Rust Actix-web 프레임워크를 사용한 백엔드 API 서버입니다. 모�
 
 ### 설치 및 실행
 
-1. 의존성 설치 및 빌드:
+1. 환경변수 설정:
+```bash
+# env.example을 .env로 복사
+cp env.example .env
+
+# .env 파일을 편집하여 설정을 변경
+# DATABASE_URL=postgresql://postgres:123@localhost:5432/bigpicture
+# SERVER_PORT=5500
+# 등등...
+```
+
+2. 의존성 설치 및 빌드:
 ```bash
 cargo build
 ```
 
-2. 서버 실행:
+3. 서버 실행:
 ```bash
 cargo run
 ```
@@ -35,6 +46,7 @@ bigpictureback/
 │   ├── thumbnail/        # 썸네일 이미지
 │   └── map/             # 지도용 이미지
 ├── Cargo.toml           # Rust 프로젝트 설정
+├── env.example          # 환경변수 예시 파일
 └── README.md            # 프로젝트 문서
 ```
 
@@ -49,6 +61,10 @@ bigpictureback/
 - `POST /api/images/upload/map` - 지도용 이미지 업로드 (800x600, WebP 변환)
 - `GET /api/images/info/{filename}` - 이미지 정보 조회
 - `GET /api/images/download/{filename}` - WebP 이미지 다운로드
+- `GET /api/images/list` - 이미지 목록 조회 (전체)
+- `GET /api/images/list?type=thumbnail` - 썸네일 이미지 목록 조회
+- `GET /api/images/list?type=map` - 지도용 이미지 목록 조회
+- `GET /api/images/stats` - 이미지 통계 조회
 
 ## 🛠️ 사용된 기술
 
@@ -58,6 +74,9 @@ bigpictureback/
   - WebP 변환 - 모든 이미지를 WebP로 자동 변환
 - **Async/Await**: 비동기 처리
 - **Error Handling**: anyhow를 사용한 에러 처리
+- **Database**: PostgreSQL (bigpicture 스키마)
+- **ORM**: SQLx (비동기 SQL)
+- **Configuration**: dotenv (환경변수 관리)
 
 ## 📝 예제 요청
 
@@ -89,6 +108,21 @@ curl http://localhost:5500/api/images/info/filename.webp
 ### WebP 이미지 다운로드
 ```bash
 curl http://localhost:5500/api/images/download/filename.webp
+```
+
+### 이미지 목록 조회
+```bash
+curl http://localhost:5500/api/images/list
+```
+
+### 썸네일 이미지 목록 조회
+```bash
+curl http://localhost:5500/api/images/list?type=thumbnail
+```
+
+### 이미지 통계 조회
+```bash
+curl http://localhost:5500/api/images/stats
 ```
 
 ## 🎯 주요 기능
