@@ -1,0 +1,37 @@
+# 마커 조회 API - Postman용 curl 명령어들
+
+# 1. 기본 조회 (서울 시청 근처)
+curl -X GET "http://localhost:8080/api/markers?lat=37.5665&lng=126.9780&lat_delta=0.1&lng_delta=0.1" -H "Content-Type: application/json"
+
+# 2. 감성 태그 필터링 (😍,☕)
+curl -X GET "http://localhost:8080/api/markers?lat=37.5665&lng=126.9780&lat_delta=0.1&lng_delta=0.1&emotion_tags=😍,☕" -H "Content-Type: application/json"
+
+# 3. 최소 좋아요 수 필터링 (10개 이상)
+curl -X GET "http://localhost:8080/api/markers?lat=37.5665&lng=126.9780&lat_delta=0.1&lng_delta=0.1&min_likes=10" -H "Content-Type: application/json"
+
+# 4. 최소 조회수 필터링 (100회 이상)
+curl -X GET "http://localhost:8080/api/markers?lat=37.5665&lng=126.9780&lat_delta=0.1&lng_delta=0.1&min_views=100" -H "Content-Type: application/json"
+
+# 5. 좋아요 수로 정렬 (내림차순)
+curl -X GET "http://localhost:8080/api/markers?lat=37.5665&lng=126.9780&lat_delta=0.1&lng_delta=0.1&sort_by=likes&sort_order=desc" -H "Content-Type: application/json"
+
+# 6. 조회수로 정렬 (오름차순)
+curl -X GET "http://localhost:8080/api/markers?lat=37.5665&lng=126.9780&lat_delta=0.1&lng_delta=0.1&sort_by=views&sort_order=asc" -H "Content-Type: application/json"
+
+# 7. 복합 필터링 (감성 태그 + 최소 좋아요 + 정렬)
+curl -X GET "http://localhost:8080/api/markers?lat=37.5665&lng=126.9780&lat_delta=0.1&lng_delta=0.1&emotion_tags=😍,☕&min_likes=10&min_views=100&sort_by=likes&sort_order=desc" -H "Content-Type: application/json"
+
+# 8. 다른 지역 조회 (강남역)
+curl -X GET "http://localhost:8080/api/markers?lat=37.4981&lng=127.0276&lat_delta=0.05&lng_delta=0.05" -H "Content-Type: application/json"
+
+# 9. 더 넓은 범위 조회
+curl -X GET "http://localhost:8080/api/markers?lat=37.5665&lng=126.9780&lat_delta=0.5&lng_delta=0.5" -H "Content-Type: application/json"
+
+# 10. 생성일 기준 정렬 (최신순)
+curl -X GET "http://localhost:8080/api/markers?lat=37.5665&lng=126.9780&lat_delta=0.1&lng_delta=0.1&sort_by=created_at&sort_order=desc" -H "Content-Type: application/json"
+
+# 11. 요청하신 예시 그대로 (수정된 버전)
+curl -X GET "http://localhost:8080/api/markers?lat=37.5665&lng=126.9780&lat_delta=0.1&lng_delta=0.1&zoom=12&emotion_tags=😍,☕&min_likes=10&min_views=100&sort_by=likes&sort_order=desc&limit=50" -H "Content-Type: application/json"
+
+# 12. 성능 최적화 테스트 (limit 20개)
+curl -X GET "http://localhost:8080/api/markers?lat=37.5665&lng=126.9780&lat_delta=0.1&lng_delta=0.1&limit=20" -H "Content-Type: application/json" 

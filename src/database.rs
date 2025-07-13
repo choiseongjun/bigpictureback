@@ -2,6 +2,7 @@ use sqlx::{PgPool, Row};
 use sqlx::postgres::PgPoolOptions;
 use anyhow::Result;
 use crate::config::Config;
+use log::{info, warn, error};
 
 pub struct Database {
     pub pool: PgPool,
@@ -108,6 +109,64 @@ impl Database {
             .execute(pool)
             .await?;
         
+        // markers 테이블 생성
+        println!("📋 markers 테이블 생성 중...");
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS bigpicture.markers (
+                id BIGSERIAL PRIMARY KEY,
+                latitude DOUBLE PRECISION NOT NULL,
+                longitude DOUBLE PRECISION NOT NULL,
+                emotion_tag VARCHAR(10) NOT NULL,
+                description TEXT NOT NULL,
+                likes INTEGER DEFAULT 0,
+                dislikes INTEGER DEFAULT 0,
+                views INTEGER DEFAULT 0,
+                author VARCHAR(50) DEFAULT '익명',
+                thumbnail_img VARCHAR(500),
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                
+                CONSTRAINT check_latitude CHECK (latitude BETWEEN -90 AND 90),
+                CONSTRAINT check_longitude CHECK (longitude BETWEEN -180 AND 180),
+                CONSTRAINT check_likes CHECK (likes >= 0),
+                CONSTRAINT check_dislikes CHECK (dislikes >= 0),
+                CONSTRAINT check_views CHECK (views >= 0)
+            )
+            "#
+        )
+        .execute(pool)
+        .await?;
+        println!("✅ markers 테이블 생성 완료");
+        
+        // markers 인덱스 - 성능 최적화
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_markers_location ON bigpicture.markers(latitude, longitude)")
+            .execute(pool)
+            .await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_markers_emotion_tag ON bigpicture.markers(emotion_tag)")
+            .execute(pool)
+            .await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_markers_likes ON bigpicture.markers(likes)")
+            .execute(pool)
+            .await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_markers_views ON bigpicture.markers(views)")
+            .execute(pool)
+            .await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_markers_created_at ON bigpicture.markers(created_at)")
+            .execute(pool)
+            .await?;
+        
+        // 복합 인덱스 추가 - 자주 사용되는 조합
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_markers_location_emotion ON bigpicture.markers(latitude, longitude, emotion_tag)")
+            .execute(pool)
+            .await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_markers_location_likes ON bigpicture.markers(latitude, longitude, likes)")
+            .execute(pool)
+            .await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_markers_location_views ON bigpicture.markers(latitude, longitude, views)")
+            .execute(pool)
+            .await?;
+        
         println!("✅ 인덱스 생성 완료");
         
         // 테이블 존재 확인
@@ -124,7 +183,13 @@ impl Database {
         .fetch_one(pool)
         .await?;
         
-        if original_exists && webp_exists {
+        let markers_exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_schema = 'bigpicture' AND table_name = 'markers')"
+        )
+        .fetch_one(pool)
+        .await?;
+        
+        if original_exists && webp_exists && markers_exists {
             println!("✅ 새로운 테이블 구조가 성공적으로 생성되었습니다!");
             
             // 테이블 구조 확인
@@ -149,6 +214,19 @@ impl Database {
             .await?;
             
             for row in webp_columns {
+                let column_name: String = row.get(0);
+                let data_type: String = row.get(1);
+                println!("  - {}: {}", column_name, data_type);
+            }
+            
+            println!("📊 markers 테이블 구조:");
+            let markers_columns = sqlx::query(
+                "SELECT column_name, data_type FROM information_schema.columns WHERE table_schema = 'bigpicture' AND table_name = 'markers' ORDER BY ordinal_position"
+            )
+            .fetch_all(pool)
+            .await?;
+            
+            for row in markers_columns {
                 let column_name: String = row.get(0);
                 let data_type: String = row.get(1);
                 println!("  - {}: {}", column_name, data_type);
@@ -382,6 +460,91 @@ impl Database {
         let total_size: f64 = query.fetch_one(&self.pool).await?.get(0);
         Ok(total_size)
     }
+    
+    pub async fn get_markers(
+        &self,
+        lat: f64,
+        lng: f64,
+        lat_delta: f64,
+        lng_delta: f64,
+        emotion_tags: Option<Vec<String>>,
+        min_likes: Option<i32>,
+        min_views: Option<i32>,
+        sort_by: Option<&str>,
+        sort_order: Option<&str>,
+        limit: Option<i32>,
+    ) -> Result<Vec<Marker>> {
+        info!("🗄️ 데이터베이스 쿼리 시작:");
+        
+        let lat_min = lat - lat_delta / 2.0;
+        let lat_max = lat + lat_delta / 2.0;
+        let lng_min = lng - lng_delta / 2.0;
+        let lng_max = lng + lng_delta / 2.0;
+        
+        info!("   - 검색 범위: lat({} ~ {}), lng({} ~ {})", lat_min, lat_max, lng_min, lng_max);
+        
+        // 정렬
+        let sort_column = match sort_by {
+            Some("likes") => "likes",
+            Some("views") => "views",
+            Some("created_at") => "created_at",
+            _ => "created_at", // 기본값
+        };
+        
+        let sort_direction = match sort_order {
+            Some("asc") => "ASC",
+            Some("desc") => "DESC",
+            _ => "DESC", // 기본값
+        };
+        
+        info!("   - 정렬: {} {}", sort_column, sort_direction);
+        
+        let mut query = format!(
+            "SELECT id, latitude, longitude, emotion_tag, description, likes, dislikes, views, author, thumbnail_img, created_at, updated_at 
+             FROM bigpicture.markers 
+             WHERE latitude BETWEEN {} AND {} 
+             AND longitude BETWEEN {} AND {}",
+            lat_min, lat_max, lng_min, lng_max
+        );
+        
+        // 감성 태그 필터
+        if let Some(tags) = emotion_tags {
+            if !tags.is_empty() {
+                let tags_str = tags.iter().map(|tag| format!("'{}'", tag)).collect::<Vec<_>>().join(",");
+                query.push_str(&format!(" AND emotion_tag IN ({})", tags_str));
+                info!("   - 감성 태그 필터: {}", tags_str);
+            }
+        }
+        
+        // 최소 좋아요 수 필터
+        if let Some(likes) = min_likes {
+            query.push_str(&format!(" AND likes >= {}", likes));
+            info!("   - 최소 좋아요: {}", likes);
+        }
+        
+        // 최소 조회수 필터
+        if let Some(views) = min_views {
+            query.push_str(&format!(" AND views >= {}", views));
+            info!("   - 최소 조회수: {}", views);
+        }
+        
+        query.push_str(&format!(" ORDER BY {} {}", sort_column, sort_direction));
+        
+        // LIMIT 추가 (기본값 100개)
+        let limit_value = limit.unwrap_or(100);
+        query.push_str(&format!(" LIMIT {}", limit_value));
+        
+        info!("   - 최종 SQL 쿼리: {}", query);
+        
+        // 쿼리 실행
+        let markers = sqlx::query_as::<_, Marker>(&query)
+            .fetch_all(&self.pool)
+            .await?;
+        
+        info!("   - 쿼리 실행 완료: {}개 결과", markers.len());
+        
+        Ok(markers)
+    }
 }
 
 #[derive(sqlx::FromRow, serde::Serialize, serde::Deserialize)]
@@ -431,6 +594,22 @@ pub struct ImageInfo {
     pub height: Option<i32>,
     pub format: String,
     pub image_type: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(sqlx::FromRow, Debug, serde::Serialize)]
+pub struct Marker {
+    pub id: i64,
+    pub latitude: f64,
+    pub longitude: f64,
+    pub emotion_tag: String,
+    pub description: String,
+    pub likes: i32,
+    pub dislikes: i32,
+    pub views: i32,
+    pub author: String,
+    pub thumbnail_img: Option<String>,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
 } 

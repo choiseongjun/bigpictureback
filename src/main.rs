@@ -1,5 +1,7 @@
 use actix_web::{App, HttpServer, web};
+use actix_cors::Cors;
 use log::info;
+use http;
 
 mod image_processor;
 mod routes;
@@ -43,12 +45,21 @@ async fn main() -> std::io::Result<()> {
     
     let server_address = config.server_address();
     HttpServer::new(move || {
+        // CORS 설정 - 모든 origin 허용 (localhost, IP 주소, 도메인 모두)
+        let cors = Cors::default()
+            .allow_any_origin()
+            .allow_any_method()
+            .allow_any_header()
+            .supports_credentials()
+            .max_age(3600);
+        
         App::new()
+            .wrap(cors)
             .app_data(web::Data::new(database.pool.clone()))
             .app_data(web::Data::new(config.clone()))
             .configure(setup_routes)
     })
-    .bind(&server_address)?
+    .bind("0.0.0.0:5500")?  // 모든 IP에서 접근 가능하도록 0.0.0.0으로 바인딩
     .run()
     .await
 }

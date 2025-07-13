@@ -26,6 +26,7 @@ pub struct Config {
     // File Upload
     pub max_file_size_mb: f64,
     pub upload_dir: String,
+    pub file_server_url: String,
 }
 
 impl Config {
@@ -84,7 +85,8 @@ impl Config {
                 .unwrap_or_else(|_| "10".to_string())
                 .parse()
                 .unwrap_or(10.0),
-            upload_dir: env::var("UPLOAD_DIR").unwrap_or_else(|_| "./uploads".to_string()),
+            upload_dir: env::var("UPLOAD_DIR").unwrap_or_else(|_| "/uploads".to_string()),
+            file_server_url: env::var("FILE_SERVER_URL").unwrap_or_else(|_| "http://localhost:5500".to_string()),
         })
     }
     
@@ -100,6 +102,30 @@ impl Config {
                 "postgresql://{}:{}@{}:{}/{}",
                 self.db_user, self.db_password, self.db_host, self.db_port, self.db_name
             )
+        }
+    }
+    
+    pub fn get_file_url(&self, filename: &str) -> String {
+        format!("{}/api/images/download/{}", self.file_server_url, filename)
+    }
+    
+    pub fn get_original_file_url(&self, filename: &str) -> String {
+        format!("{}/api/images/download/original/{}", self.file_server_url, filename)
+    }
+    
+    pub fn get_upload_path(&self, image_type: &str) -> String {
+        if self.upload_dir.starts_with('/') {
+            format!("{}/{}", self.upload_dir, image_type)
+        } else {
+            format!("{}/{}", self.upload_dir, image_type)
+        }
+    }
+    
+    pub fn get_original_upload_path(&self, image_type: &str) -> String {
+        if self.upload_dir.starts_with('/') {
+            format!("{}/{}_original", self.upload_dir, image_type)
+        } else {
+            format!("{}/{}_original", self.upload_dir, image_type)
         }
     }
 } 
