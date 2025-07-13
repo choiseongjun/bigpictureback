@@ -27,11 +27,18 @@ pub struct Config {
     pub max_file_size_mb: f64,
     pub upload_dir: String,
     pub file_server_url: String,
+    
+    // S3
+    pub s3_bucket_name: String,
+    pub s3_region: String,
+    pub s3_access_key_id: String,
+    pub s3_secret_access_key: String,
 }
 
 impl Config {
     pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
-        // .env 파일 로드
+        // env.local을 먼저 로드하고, .env는 나중에 로드
+        dotenv::from_filename("env.local").ok();
         dotenv().ok();
         
         Ok(Self {
@@ -56,13 +63,13 @@ impl Config {
             
             // Image Processing
             thumbnail_max_width: env::var("THUMBNAIL_MAX_WIDTH")
-                .unwrap_or_else(|_| "300".to_string())
+                .unwrap_or_else(|_| "800".to_string())
                 .parse()
-                .unwrap_or(300),
+                .unwrap_or(800),
             thumbnail_max_height: env::var("THUMBNAIL_MAX_HEIGHT")
-                .unwrap_or_else(|_| "300".to_string())
+                .unwrap_or_else(|_| "800".to_string())
                 .parse()
-                .unwrap_or(300),
+                .unwrap_or(800),
             thumbnail_quality: env::var("THUMBNAIL_QUALITY")
                 .unwrap_or_else(|_| "80".to_string())
                 .parse()
@@ -82,11 +89,17 @@ impl Config {
             
             // File Upload
             max_file_size_mb: env::var("MAX_FILE_SIZE_MB")
-                .unwrap_or_else(|_| "10".to_string())
+                .unwrap_or_else(|_| "30".to_string())
                 .parse()
-                .unwrap_or(10.0),
+                .unwrap_or(30.0),
             upload_dir: env::var("UPLOAD_DIR").unwrap_or_else(|_| "/uploads".to_string()),
             file_server_url: env::var("FILE_SERVER_URL").unwrap_or_else(|_| "http://localhost:5500".to_string()),
+            
+            // S3
+            s3_bucket_name: env::var("S3_BUCKET_NAME").unwrap_or_else(|_| "bigpicture-uploads".to_string()),
+            s3_region: env::var("S3_REGION").unwrap_or_else(|_| "ap-northeast-2".to_string()),
+            s3_access_key_id: env::var("AWS_ACCESS_KEY_ID").unwrap_or_else(|_| "".to_string()),
+            s3_secret_access_key: env::var("AWS_SECRET_ACCESS_KEY").unwrap_or_else(|_| "".to_string()),
         })
     }
     

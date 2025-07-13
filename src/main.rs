@@ -7,10 +7,13 @@ mod image_processor;
 mod routes;
 mod database;
 mod config;
+mod s3_service;
+mod s3_routes;
 
 use routes::setup_routes;
 use database::Database;
 use config::Config;
+use s3_service::S3Service;
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
@@ -43,6 +46,23 @@ async fn main() -> std::io::Result<()> {
         }
     };
     
+    // S3 서비스 초기화
+    let s3_service = match S3Service::new(
+        config.s3_bucket_name.clone(), 
+        config.s3_region.clone(),
+        config.s3_access_key_id.clone(),
+        config.s3_secret_access_key.clone()
+    ).await {
+        Ok(s3) => {
+            info!("✅ S3 서비스 초기화 성공");
+            s3
+        }
+        Err(e) => {
+            eprintln!("❌ S3 서비스 초기화 실패: {}", e);
+            return Err(std::io::Error::new(std::io::ErrorKind::Other, "S3 service initialization failed"));
+        }
+    };
+    
     let server_address = config.server_address();
     HttpServer::new(move || {
         // CORS 설정 - 모든 origin 허용 (localhost, IP 주소, 도메인 모두)
@@ -57,6 +77,7 @@ async fn main() -> std::io::Result<()> {
             .wrap(cors)
             .app_data(web::Data::new(database.pool.clone()))
             .app_data(web::Data::new(config.clone()))
+            .app_data(web::Data::new(s3_service.clone()))
             .configure(setup_routes)
     })
     .bind("0.0.0.0:5500")?  // 모든 IP에서 접근 가능하도록 0.0.0.0으로 바인딩

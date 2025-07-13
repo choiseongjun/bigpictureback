@@ -12,6 +12,8 @@ use log::{info, warn, error};
 use crate::image_processor::ImageProcessor;
 use crate::database;
 use crate::config::Config;
+use crate::s3_service::S3Service;
+use crate::s3_routes::{upload_image_s3, upload_circular_thumbnail_s3_internal};
 
 #[derive(Serialize, Deserialize)]
 pub struct ImageResponse {
@@ -39,8 +41,14 @@ pub fn setup_routes(config: &mut web::ServiceConfig) {
                         .route("/info/{filename:.*}", web::get().to(get_image_info))
                         .route("/download/{filename:.*}", web::get().to(download_image))
                         .route("/download/original/{filename:.*}", web::get().to(download_original_image))
-                .route("/list", web::get().to(list_images))
-                .route("/stats", web::get().to(get_image_stats))
+                        .route("/list", web::get().to(list_images))
+                        .route("/stats", web::get().to(get_image_stats))
+                )
+                .service(
+                    web::scope("/s3")
+                        .route("/upload/thumbnail", web::post().to(upload_thumbnail_s3))
+                        .route("/upload/map", web::post().to(upload_map_s3))
+                        .route("/upload/circular", web::post().to(upload_circular_thumbnail_s3))
                 )
         )
         .route("/", web::get().to(index));
@@ -140,6 +148,45 @@ async fn get_markers(
     }
 }
 
+// S3 업로드 함수들
+async fn upload_thumbnail_s3(
+    payload: Multipart, 
+    pool: web::Data<PgPool>, 
+    config: web::Data<Config>,
+    s3_service: web::Data<S3Service>
+) -> Result<HttpResponse> {
+    let processor = ImageProcessor::new(
+        config.thumbnail_max_width,
+        config.thumbnail_max_height,
+        config.thumbnail_quality
+    );
+    upload_image_s3(payload, "thumbnail", processor, pool, config, s3_service).await
+}
+
+async fn upload_map_s3(
+    payload: Multipart, 
+    pool: web::Data<PgPool>, 
+    config: web::Data<Config>,
+    s3_service: web::Data<S3Service>
+) -> Result<HttpResponse> {
+    let processor = ImageProcessor::new(
+        config.map_max_width,
+        config.map_max_height,
+        config.map_quality
+    );
+    upload_image_s3(payload, "map", processor, pool, config, s3_service).await
+}
+
+async fn upload_circular_thumbnail_s3(
+    payload: Multipart, 
+    pool: web::Data<PgPool>, 
+    config: web::Data<Config>,
+    s3_service: web::Data<S3Service>
+) -> Result<HttpResponse> {
+    let processor = ImageProcessor::new(250, 250, 85);
+    upload_circular_thumbnail_s3_internal(payload, "circular_thumbnail", processor, pool, config, s3_service).await
+}
+
 async fn upload_thumbnail(payload: Multipart, pool: web::Data<PgPool>, config: web::Data<Config>) -> Result<HttpResponse> {
     let processor = ImageProcessor::new(
         config.thumbnail_max_width,
@@ -226,7 +273,7 @@ async fn upload_circular_thumbnail(
     if processor.get_file_size_mb(&image_data) > config.max_file_size_mb {
         return Ok(HttpResponse::BadRequest().json(ImageResponse {
             success: false,
-            message: "파일 크기는 10MB를 초과할 수 없습니다".to_string(),
+            message: "파일 크기는 30MB를 초과할 수 없습니다".to_string(),
             filename: None,
             size_mb: None,
             width: None,
@@ -430,7 +477,7 @@ async fn upload_image(
     if processor.get_file_size_mb(&image_data) > config.max_file_size_mb {
         return Ok(HttpResponse::BadRequest().json(ImageResponse {
             success: false,
-            message: "파일 크기는 10MB를 초과할 수 없습니다".to_string(),
+            message: "파일 크기는 30MB를 초과할 수 없습니다".to_string(),
             filename: None,
             size_mb: None,
             width: None,

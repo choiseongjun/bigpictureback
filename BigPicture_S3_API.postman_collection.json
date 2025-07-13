@@ -1,0 +1,317 @@
+{
+	"info": {
+		"_postman_id": "bigpicture-s3-api",
+		"name": "BigPicture S3 API",
+		"description": "BigPicture 백엔드 S3 업로드 API 컬렉션",
+		"schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+	},
+	"item": [
+		{
+			"name": "S3 Upload APIs",
+			"item": [
+				{
+					"name": "Upload Thumbnail (S3)",
+					"request": {
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "formdata",
+							"formdata": [
+								{
+									"key": "image",
+									"type": "file",
+									"src": []
+								}
+							]
+						},
+						"url": {
+							"raw": "http://localhost:5500/api/s3/upload/thumbnail",
+							"protocol": "http",
+							"host": [
+								"localhost"
+							],
+							"port": "5500",
+							"path": [
+								"api",
+								"s3",
+								"upload",
+								"thumbnail"
+							]
+						},
+						"description": "S3에 썸네일 이미지 업로드"
+					},
+					"response": []
+				},
+				{
+					"name": "Upload Map Image (S3)",
+					"request": {
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "formdata",
+							"formdata": [
+								{
+									"key": "image",
+									"type": "file",
+									"src": []
+								}
+							]
+						},
+						"url": {
+							"raw": "http://localhost:5500/api/s3/upload/map",
+							"protocol": "http",
+							"host": [
+								"localhost"
+							],
+							"port": "5500",
+							"path": [
+								"api",
+								"s3",
+								"upload",
+								"map"
+							]
+						},
+						"description": "S3에 지도 이미지 업로드"
+					},
+					"response": []
+				},
+				{
+					"name": "Upload Circular Thumbnail (S3)",
+					"request": {
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "formdata",
+							"formdata": [
+								{
+									"key": "image",
+									"type": "file",
+									"src": []
+								}
+							]
+						},
+						"url": {
+							"raw": "http://localhost:5500/api/s3/upload/circular",
+							"protocol": "http",
+							"host": [
+								"localhost"
+							],
+							"port": "5500",
+							"path": [
+								"api",
+								"s3",
+								"upload",
+								"circular"
+							]
+						},
+						"description": "S3에 원형 썸네일 이미지 업로드"
+					},
+					"response": []
+				}
+			],
+			"description": "S3 업로드 관련 API들"
+		},
+		{
+			"name": "Local Upload APIs",
+			"item": [
+				{
+					"name": "Upload Thumbnail (Local)",
+					"request": {
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "formdata",
+							"formdata": [
+								{
+									"key": "image",
+									"type": "file",
+									"src": []
+								}
+							]
+						},
+						"url": {
+							"raw": "http://localhost:5500/api/images/upload/thumbnail",
+							"protocol": "http",
+							"host": [
+								"localhost"
+							],
+							"port": "5500",
+							"path": [
+								"api",
+								"images",
+								"upload",
+								"thumbnail"
+							]
+						},
+						"description": "로컬에 썸네일 이미지 업로드"
+					},
+					"response": []
+				},
+				{
+					"name": "Upload Map Image (Local)",
+					"request": {
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "formdata",
+							"formdata": [
+								{
+									"key": "image",
+									"type": "file",
+									"src": []
+								}
+							]
+						},
+						"url": {
+							"raw": "http://localhost:5500/api/images/upload/map",
+							"protocol": "http",
+							"host": [
+								"localhost"
+							],
+							"port": "5500",
+							"path": [
+								"api",
+								"images",
+								"upload",
+								"map"
+							]
+						},
+						"description": "로컬에 지도 이미지 업로드"
+					},
+					"response": []
+				},
+				{
+					"name": "Generate Circular Thumbnail",
+					"request": {
+						"method": "POST",
+						"header": [],
+						"body": {
+							"mode": "formdata",
+							"formdata": [
+								{
+									"key": "image",
+									"type": "file",
+									"src": []
+								}
+							]
+						},
+						"url": {
+							"raw": "http://localhost:5500/api/images/generate/thumbnail",
+							"protocol": "http",
+							"host": [
+								"localhost"
+							],
+							"port": "5500",
+							"path": [
+								"api",
+								"images",
+								"generate",
+								"thumbnail"
+							]
+						},
+						"description": "원형 썸네일 생성"
+					},
+					"response": []
+				}
+			],
+			"description": "로컬 업로드 관련 API들"
+		},
+		{
+			"name": "Other APIs",
+			"item": [
+				{
+					"name": "Health Check",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "http://localhost:5500/api/health",
+							"protocol": "http",
+							"host": [
+								"localhost"
+							],
+							"port": "5500",
+							"path": [
+								"api",
+								"health"
+							]
+						},
+						"description": "서버 상태 확인"
+					},
+					"response": []
+				},
+				{
+					"name": "Get Markers",
+					"request": {
+						"method": "GET",
+						"header": [],
+						"url": {
+							"raw": "http://localhost:5500/api/markers?lat=37.5665&lng=126.9780&lat_delta=0.1&lng_delta=0.1&limit=10",
+							"protocol": "http",
+							"host": [
+								"localhost"
+							],
+							"port": "5500",
+							"path": [
+								"api",
+								"markers"
+							],
+							"query": [
+								{
+									"key": "lat",
+									"value": "37.5665"
+								},
+								{
+									"key": "lng",
+									"value": "126.9780"
+								},
+								{
+									"key": "lat_delta",
+									"value": "0.1"
+								},
+								{
+									"key": "lng_delta",
+									"value": "0.1"
+								},
+								{
+									"key": "limit",
+									"value": "10"
+								}
+							]
+						},
+						"description": "마커 조회"
+					},
+					"response": []
+				}
+			],
+			"description": "기타 API들"
+		}
+	],
+	"event": [
+		{
+			"listen": "prerequest",
+			"script": {
+				"type": "text/javascript",
+				"exec": [
+					""
+				]
+			}
+		},
+		{
+			"listen": "test",
+			"script": {
+				"type": "text/javascript",
+				"exec": [
+					""
+				]
+			}
+		}
+	],
+	"variable": [
+		{
+			"key": "base_url",
+			"value": "http://localhost:5500",
+			"type": "string"
+		}
+	]
+} 

@@ -1,0 +1,102 @@
+# Postman용 S3 업로드 API curl 명령어
+
+## 1. 썸네일 업로드 (S3)
+```bash
+curl --location 'http://localhost:5500/api/s3/upload/thumbnail' \
+--form 'image=@"/path/to/your/image.jpg"'
+```
+
+## 2. 지도 이미지 업로드 (S3)
+```bash
+curl --location 'http://localhost:5500/api/s3/upload/map' \
+--form 'image=@"/path/to/your/map.jpg"'
+```
+
+## 3. 원형 썸네일 업로드 (S3)
+```bash
+curl --location 'http://localhost:5500/api/s3/upload/circular' \
+--form 'image=@"/path/to/your/image.jpg"'
+```
+
+## Postman 설정 방법
+
+### 1. 썸네일 업로드
+- **Method**: POST
+- **URL**: `http://localhost:5500/api/s3/upload/thumbnail`
+- **Headers**: 
+  - `Content-Type`: `multipart/form-data` (자동 설정됨)
+- **Body**: 
+  - Type: `form-data`
+  - Key: `image`
+  - Type: `File`
+  - Value: 이미지 파일 선택
+
+### 2. 지도 이미지 업로드
+- **Method**: POST
+- **URL**: `http://localhost:5500/api/s3/upload/map`
+- **Headers**: 
+  - `Content-Type`: `multipart/form-data` (자동 설정됨)
+- **Body**: 
+  - Type: `form-data`
+  - Key: `image`
+  - Type: `File`
+  - Value: 이미지 파일 선택
+
+### 3. 원형 썸네일 업로드
+- **Method**: POST
+- **URL**: `http://localhost:5500/api/s3/upload/circular`
+- **Headers**: 
+  - `Content-Type`: `multipart/form-data` (자동 설정됨)
+- **Body**: 
+  - Type: `form-data`
+  - Key: `image`
+  - Type: `File`
+  - Value: 이미지 파일 선택
+
+## 응답 예시
+```json
+{
+  "success": true,
+  "message": "S3 업로드 성공",
+  "filename": "image.jpg",
+  "size_mb": 2.5,
+  "width": 1920,
+  "height": 1080,
+  "format": "JPEG",
+  "s3_url": "https://bigpicture-jun-dev.s3.ap-northeast-2.amazonaws.com/thumbnails/thumbnail_a1b2c3d4_1234567890.webp"
+}
+```
+
+## Windows PowerShell에서 테스트
+```powershell
+# 썸네일 업로드
+Invoke-RestMethod -Uri "http://localhost:5500/api/s3/upload/thumbnail" -Method POST -Form @{image=Get-Item "C:\path\to\your\image.jpg"}
+
+# 지도 이미지 업로드
+Invoke-RestMethod -Uri "http://localhost:5500/api/s3/upload/map" -Method POST -Form @{image=Get-Item "C:\path\to\your\map.jpg"}
+
+# 원형 썸네일 업로드
+Invoke-RestMethod -Uri "http://localhost:5500/api/s3/upload/circular" -Method POST -Form @{image=Get-Item "C:\path\to\your\image.jpg"}
+```
+
+## 기존 로컬 업로드 API (참고용)
+```bash
+# 로컬 썸네일 업로드
+curl --location 'http://localhost:5500/api/images/upload/thumbnail' \
+--form 'image=@"/path/to/your/image.jpg"'
+
+# 로컬 지도 이미지 업로드
+curl --location 'http://localhost:5500/api/images/upload/map' \
+--form 'image=@"/path/to/your/map.jpg"'
+
+# 원형 썸네일 생성
+curl --location 'http://localhost:5500/api/images/generate/thumbnail' \
+--form 'image=@"/path/to/your/image.jpg"'
+```
+
+## 주의사항
+1. 서버가 실행 중이어야 합니다 (`cargo run`)
+2. S3 버킷 `bigpicture-jun-dev`가 존재해야 합니다
+3. AWS 액세스 키가 올바르게 설정되어야 합니다
+4. 파일 크기는 30MB를 초과할 수 없습니다
+5. 지원되는 이미지 형식: jpg, jpeg, png, gif, bmp, webp 

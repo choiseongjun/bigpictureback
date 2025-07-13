@@ -4,6 +4,7 @@ use imageproc::drawing::draw_filled_circle;
 use std::path::Path;
 use anyhow::Result;
 use webp::{Encoder, WebPMemory};
+use log::info;
 
 pub struct ImageProcessor {
     pub max_width: u32,
@@ -21,16 +22,34 @@ impl ImageProcessor {
     }
 
     pub fn process_image(&self, image_data: &[u8]) -> Result<Vec<u8>> {
+        // 파일 크기 확인
+        let file_size_mb = self.get_file_size_mb(image_data);
+        info!("🖼️ 이미지 처리 시작: {:.2}MB", file_size_mb);
+        
         // 이미지 디코딩
         let img = image::load_from_memory(image_data)?;
+        let (width, height) = img.dimensions();
         
-        // 이미지 리사이즈
+        // 이미 적절한 크기인 경우 WebP 변환만 수행
+        if width <= self.max_width && height <= self.max_height {
+            info!("📏 이미지 크기 적절함 - WebP 변환만 수행");
+            let rgba = img.to_rgba8();
+            let encoder = Encoder::from_rgba(&rgba, rgba.width(), rgba.height());
+            let webp_data: WebPMemory = encoder.encode(80.0);
+            return Ok(webp_data.to_vec());
+        }
+        
+        // 리사이즈가 필요한 경우
+        info!("📐 이미지 리사이즈 필요: {}x{} -> {}x{}", width, height, self.max_width, self.max_height);
         let resized = self.resize_image(img);
         
         // WebP로 인코딩
         let rgba = resized.to_rgba8();
         let encoder = Encoder::from_rgba(&rgba, rgba.width(), rgba.height());
-        let webp_data: WebPMemory = encoder.encode(self.quality as f32);
+        let webp_data: WebPMemory = encoder.encode(80.0);
+        
+        let processed_size_mb = webp_data.len() as f64 / (1024.0 * 1024.0);
+        info!("✅ 이미지 처리 완료: {:.2}MB -> {:.2}MB", file_size_mb, processed_size_mb);
         
         Ok(webp_data.to_vec())
     }
@@ -62,7 +81,22 @@ impl ImageProcessor {
         }
         
         // 비율을 유지하면서 리사이즈
-        img.resize(self.max_width, self.max_height, image::imageops::FilterType::Lanczos3)
+        let ratio = (self.max_width as f32 / width as f32).min(self.max_height as f32 / height as f32);
+        let new_width = (width as f32 * ratio) as u32;
+        let new_height = (height as f32 * ratio) as u32;
+        
+        info!("📐 리사이즈: {}x{} -> {}x{} (비율: {:.2})", width, height, new_width, new_height, ratio);
+        
+        // 큰 이미지의 경우 더 빠른 필터 사용
+        let filter = if width > 2000 || height > 2000 {
+            image::imageops::FilterType::Nearest // 가장 빠른 필터
+        } else if width > 1000 || height > 1000 {
+            image::imageops::FilterType::Triangle // 중간 속도
+        } else {
+            image::imageops::FilterType::Lanczos3 // 고품질
+        };
+        
+        img.resize(new_width, new_height, filter)
     }
 
     fn crop_to_square(&self, img: DynamicImage) -> DynamicImage {
