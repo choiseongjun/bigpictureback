@@ -54,6 +54,7 @@ impl S3Service {
     pub async fn upload_file(&self, data: Vec<u8>, key: &str, content_type: &str) -> Result<String> {
         info!("📤 S3 업로드 시작: {}", key);
         info!("📤 버킷: {}, 리전: {}", self.bucket_name, self.region);
+        info!("📤 파일 크기: {:.2}MB", data.len() as f64 / (1024.0 * 1024.0));
         
         let put_request = PutObjectRequest {
             bucket: self.bucket_name.clone(),
@@ -63,6 +64,7 @@ impl S3Service {
             ..Default::default()
         };
         
+        // 단일 시도 (재시도는 나중에 구현)
         match self.client.put_object(put_request).await {
             Ok(result) => {
                 let url = format!("https://{}.s3.{}.amazonaws.com/{}", self.bucket_name, self.region, key);

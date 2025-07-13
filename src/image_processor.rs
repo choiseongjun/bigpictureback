@@ -26,6 +26,8 @@ impl ImageProcessor {
         let file_size_mb = self.get_file_size_mb(image_data);
         info!("🖼️ 이미지 처리 시작: {:.2}MB", file_size_mb);
         
+
+        
         // 이미지 디코딩
         let img = image::load_from_memory(image_data)?;
         let (width, height) = img.dimensions();
@@ -55,11 +57,30 @@ impl ImageProcessor {
     }
 
     pub fn process_circular_thumbnail(&self, image_data: &[u8]) -> Result<Vec<u8>> {
+        let file_size_mb = self.get_file_size_mb(image_data);
+        info!("🔄 원형 썸네일 처리 시작: {:.2}MB", file_size_mb);
+        
         // 이미지 디코딩
         let img = image::load_from_memory(image_data)?;
+        let (width, height) = img.dimensions();
+        
+        // 원형 썸네일은 최대 500x500으로 제한 (S3 업로드 안정성)
+        let max_circular_size = 500u32;
+        let processed_img = if width > max_circular_size || height > max_circular_size || file_size_mb > 5.0 {
+            info!("📐 원형 썸네일 크기 제한 - 리사이즈: {}x{} -> {}x{}", width, height, max_circular_size, max_circular_size);
+            
+            // 비율을 유지하면서 최대 크기로 리사이즈
+            let ratio = (max_circular_size as f32 / width as f32).min(max_circular_size as f32 / height as f32);
+            let new_width = (width as f32 * ratio) as u32;
+            let new_height = (height as f32 * ratio) as u32;
+            
+            img.resize(new_width, new_height, image::imageops::FilterType::Nearest)
+        } else {
+            img
+        };
         
         // 정사각형으로 크롭
-        let cropped = self.crop_to_square(img);
+        let cropped = self.crop_to_square(processed_img);
         
         // 원형으로 마스킹하고 흰색 테두리 추가
         let circular = self.make_circular_with_border(cropped);
@@ -68,6 +89,9 @@ impl ImageProcessor {
         let rgba = circular.to_rgba8();
         let encoder = Encoder::from_rgba(&rgba, rgba.width(), rgba.height());
         let webp_data: WebPMemory = encoder.encode(self.quality as f32);
+        
+        let processed_size_mb = webp_data.len() as f64 / (1024.0 * 1024.0);
+        info!("✅ 원형 썸네일 처리 완료: {:.2}MB -> {:.2}MB", file_size_mb, processed_size_mb);
         
         Ok(webp_data.to_vec())
     }
