@@ -34,8 +34,10 @@ pub struct RegisterMember {
     pub profile_image_url: Option<String>,
     pub region: Option<String>,
     pub gender: Option<String>,
-    pub age: Option<i32>,
+    pub birth_year: Option<i32>,
     pub personality_type: Option<String>,
+    pub interests: Option<Vec<String>>,
+    pub hobbies: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
@@ -49,8 +51,10 @@ pub struct RegisterSocialMember {
     pub profile_image_url: Option<String>,
     pub region: Option<String>,
     pub gender: Option<String>,
-    pub age: Option<i32>,
+    pub birth_year: Option<i32>,
     pub personality_type: Option<String>,
+    pub interests: Option<Vec<String>>,
+    pub hobbies: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
@@ -962,19 +966,29 @@ async fn register_member(
     payload: web::Json<RegisterMember>,
 ) -> Result<HttpResponse> {
     let input = payload.into_inner();
-    match db.create_member(
+    let member_result = db.create_member(
         &input.email,
         &input.nickname,
         input.profile_image_url.as_deref(),
         input.region.as_deref(),
         input.gender.as_deref(),
-        input.age,
+        input.birth_year,
         input.personality_type.as_deref(),
-    ).await {
-        Ok(member) => Ok(HttpResponse::Ok().json(serde_json::json!({
-            "success": true,
-            "data": member
-        }))),
+    ).await;
+    match member_result {
+        Ok(member) => {
+            // 관심사/취미 연결
+            if let Some(interests) = &input.interests {
+                let _ = db.add_member_interests(member.id, interests).await;
+            }
+            if let Some(hobbies) = &input.hobbies {
+                let _ = db.add_member_hobbies(member.id, hobbies).await;
+            }
+            Ok(HttpResponse::Ok().json(serde_json::json!({
+                "success": true,
+                "data": member
+            })))
+        },
         Err(e) => Ok(HttpResponse::InternalServerError().json(serde_json::json!({
             "success": false,
             "message": format!("회원 등록 실패: {}", e)
@@ -1102,7 +1116,7 @@ async fn register_social_member(
                 input.profile_image_url.as_deref(),
                 input.region.as_deref(),
                 input.gender.as_deref(),
-                input.age,
+                input.birth_year,
                 input.personality_type.as_deref(),
             ).await
         }
@@ -1117,7 +1131,7 @@ async fn register_social_member(
                 input.profile_image_url.as_deref(),
                 input.region.as_deref(),
                 input.gender.as_deref(),
-                input.age,
+                input.birth_year,
                 input.personality_type.as_deref(),
             ).await
         }
@@ -1131,6 +1145,13 @@ async fn register_social_member(
     
     match result {
         Ok((member, auth_provider)) => {
+            // 관심사/취미 연결
+            if let Some(interests) = &input.interests {
+                let _ = db.add_member_interests(member.id, interests).await;
+            }
+            if let Some(hobbies) = &input.hobbies {
+                let _ = db.add_member_hobbies(member.id, hobbies).await;
+            }
             info!("✅ 새로운 회원 생성 성공: ID {}", member.id);
             Ok(HttpResponse::Ok().json(serde_json::json!({
                 "success": true,

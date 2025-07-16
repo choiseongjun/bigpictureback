@@ -247,7 +247,7 @@ impl Database {
                 profile_image_url TEXT,
                 region VARCHAR(100),
                 gender VARCHAR(10) CHECK (gender IN ('male', 'female', 'other', 'prefer_not_to_say')),
-                age INTEGER CHECK (age >= 0 AND age <= 150),
+                age INTEGER CHECK (age IS NULL OR (age >= 1900 AND age <= 2100)),
                 personality_type VARCHAR(50),
                 is_active BOOLEAN DEFAULT TRUE,
                 email_verified BOOLEAN DEFAULT FALSE,
@@ -668,7 +668,7 @@ impl Database {
         profile_image_url: Option<&str>,
         region: Option<&str>,
         gender: Option<&str>,
-        age: Option<i32>,
+        birth_year: Option<i32>,
         personality_type: Option<&str>,
     ) -> Result<Member> {
         let rec = sqlx::query_as::<_, Member>(
@@ -684,7 +684,7 @@ impl Database {
         .bind(profile_image_url)
         .bind(region)
         .bind(gender)
-        .bind(age)
+        .bind(birth_year)
         .bind(personality_type)
         .fetch_one(&self.pool)
         .await?;
@@ -741,7 +741,7 @@ impl Database {
         profile_image_url: Option<&str>,
         region: Option<&str>,
         gender: Option<&str>,
-        age: Option<i32>,
+        birth_year: Option<i32>,
         personality_type: Option<&str>,
     ) -> Result<(Member, AuthProvider)> {
         let mut tx = self.pool.begin().await?;
@@ -760,7 +760,7 @@ impl Database {
         .bind(profile_image_url)
         .bind(region)
         .bind(gender)
-        .bind(age)
+        .bind(birth_year)
         .bind(personality_type)
         .bind(provider_type != "email") // 소셜 로그인은 이메일 인증 완료로 간주
         .fetch_one(&mut *tx)
@@ -795,7 +795,7 @@ impl Database {
         profile_image_url: Option<&str>,
         region: Option<&str>,
         gender: Option<&str>,
-        age: Option<i32>,
+        birth_year: Option<i32>,
         personality_type: Option<&str>,
     ) -> Result<(Member, AuthProvider)> {
         let mut tx = self.pool.begin().await?;
@@ -814,7 +814,7 @@ impl Database {
         .bind(profile_image_url)
         .bind(region)
         .bind(gender)
-        .bind(age)
+        .bind(birth_year)
         .bind(personality_type)
         .bind(false) // 이메일 인증 필요
         .fetch_one(&mut *tx)
@@ -960,6 +960,67 @@ impl Database {
         .await?;
 
         Ok(auth_provider)
+    }
+
+    // 관심사 연결
+    pub async fn add_member_interests(&self, member_id: i32, interests: &[String]) -> Result<()> {
+        for interest_name in interests {
+            // 관심사 id 찾기 또는 생성
+            let interest = sqlx::query_as::<_, Interest>(
+                r#"
+                INSERT INTO bigpicture.interests (name, is_active)
+                VALUES ($1, true)
+                ON CONFLICT (name) DO UPDATE SET is_active = true
+                RETURNING *
+                "#
+            )
+            .bind(interest_name)
+            .fetch_one(&self.pool)
+            .await?;
+            // 연결
+            sqlx::query(
+                r#"
+                INSERT INTO bigpicture.member_interests (member_id, interest_id)
+                VALUES ($1, $2)
+                ON CONFLICT DO NOTHING
+                "#
+            )
+            .bind(member_id)
+            .bind(interest.id)
+            .execute(&self.pool)
+            .await?;
+        }
+        Ok(())
+    }
+    // 취미 연결
+    pub async fn add_member_hobbies(&self, member_id: i32, hobbies: &[String]) -> Result<()> {
+        for hobby_name in hobbies {
+            // 취미 id 찾기 또는 생성
+            let hobby = sqlx::query_as::<_, Hobby>(
+                r#"
+                INSERT INTO bigpicture.hobbies (name, is_active)
+                VALUES ($1, true)
+                ON CONFLICT (name) DO UPDATE SET is_active = true
+                RETURNING *
+                "#
+            )
+            .bind(hobby_name)
+            .fetch_one(&self.pool)
+            .await?;
+            // 연결
+            sqlx::query(
+                r#"
+                INSERT INTO bigpicture.member_hobbies (member_id, hobby_id)
+                VALUES ($1, $2)
+                ON CONFLICT DO NOTHING
+                "#
+            )
+            .bind(member_id)
+            .bind(hobby.id)
+            .execute(&self.pool)
+            .await?;
+        }
+        Ok(())
     }
 }
 
