@@ -70,7 +70,8 @@ impl S3Service {
                 let url = format!("https://{}.s3.{}.amazonaws.com/{}", self.bucket_name, self.region, key);
                 info!("✅ S3 업로드 완료: {}", url);
                 info!("✅ ETag: {:?}", result.e_tag);
-                Ok(url)
+                // 파일 경로만 반환 (도메인 제외, 앞에 / 추가)
+                Ok(format!("/{}", key))
             }
             Err(e) => {
                 error!("❌ S3 업로드 실패: {:?}", e);
@@ -82,8 +83,8 @@ impl S3Service {
     pub async fn upload_thumbnail(&self, image_data: Vec<u8>, _original_filename: &str) -> Result<String> {
         let timestamp = Utc::now().timestamp();
         let uuid = Uuid::new_v4().to_string()[..8].to_string();
-        // 무조건 webp로 저장
-        let key = format!("thumbnails/{}_{}_{}.webp", "thumbnail", uuid, timestamp);
+        // markers 폴더에 webp로 저장
+        let key = format!("markers/{}_{}_{}.webp", "thumbnail", uuid, timestamp);
         let content_type = "image/webp";
         self.upload_file(image_data, &key, content_type).await
     }

@@ -76,6 +76,7 @@ async fn main() -> std::io::Result<()> {
         App::new()
             .wrap(cors)
             .app_data(web::Data::new(database.pool.clone()))
+            .app_data(web::Data::new(database.clone()))
             .app_data(web::Data::new(config.clone()))
             .app_data(web::Data::new(s3_service.clone()))
             .configure(setup_routes)

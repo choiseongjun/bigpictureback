@@ -4,6 +4,7 @@ use anyhow::Result;
 use crate::config::Config;
 use log::{info, warn, error};
 
+#[derive(Clone)]
 pub struct Database {
     pub pool: PgPool,
 }
@@ -234,6 +235,119 @@ impl Database {
         } else {
             println!("❌ 테이블 생성에 실패했습니다!");
         }
+        
+        // 회원/멤버 관련 테이블 생성
+        println!("📋 members 테이블 생성 중...");
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS bigpicture.members (
+                id SERIAL PRIMARY KEY,
+                email VARCHAR(255) UNIQUE NOT NULL,
+                nickname VARCHAR(100) NOT NULL,
+                profile_image_url TEXT,
+                region VARCHAR(100),
+                gender VARCHAR(10) CHECK (gender IN ('male', 'female', 'other', 'prefer_not_to_say')),
+                age INTEGER CHECK (age >= 0 AND age <= 150),
+                personality_type VARCHAR(50),
+                is_active BOOLEAN DEFAULT TRUE,
+                email_verified BOOLEAN DEFAULT FALSE,
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                last_login_at TIMESTAMP WITH TIME ZONE
+            )
+            "#
+        )
+        .execute(pool)
+        .await?;
+        println!("✅ members 테이블 생성 완료");
+
+        println!("📋 auth_providers 테이블 생성 중...");
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS bigpicture.auth_providers (
+                id SERIAL PRIMARY KEY,
+                member_id INTEGER NOT NULL REFERENCES bigpicture.members(id) ON DELETE CASCADE,
+                provider_type VARCHAR(20) NOT NULL CHECK (provider_type IN ('email', 'google', 'meta', 'kakao', 'naver')),
+                provider_id VARCHAR(255) NOT NULL,
+                provider_email VARCHAR(255),
+                password_hash VARCHAR(255),
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(provider_type, provider_id)
+            )
+            "#
+        )
+        .execute(pool)
+        .await?;
+        println!("✅ auth_providers 테이블 생성 완료");
+
+        println!("📋 hobbies 테이블 생성 중...");
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS bigpicture.hobbies (
+                id SERIAL PRIMARY KEY,
+                name VARCHAR(100) NOT NULL UNIQUE,
+                category VARCHAR(50),
+                description TEXT,
+                is_active BOOLEAN DEFAULT TRUE,
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+            )
+            "#
+        )
+        .execute(pool)
+        .await?;
+        println!("✅ hobbies 테이블 생성 완료");
+
+        println!("📋 interests 테이블 생성 중...");
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS bigpicture.interests (
+                id SERIAL PRIMARY KEY,
+                name VARCHAR(100) NOT NULL UNIQUE,
+                category VARCHAR(50),
+                description TEXT,
+                is_active BOOLEAN DEFAULT TRUE,
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+            )
+            "#
+        )
+        .execute(pool)
+        .await?;
+        println!("✅ interests 테이블 생성 완료");
+
+        println!("📋 member_hobbies 테이블 생성 중...");
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS bigpicture.member_hobbies (
+                id SERIAL PRIMARY KEY,
+                member_id INTEGER NOT NULL REFERENCES bigpicture.members(id) ON DELETE CASCADE,
+                hobby_id INTEGER NOT NULL REFERENCES bigpicture.hobbies(id) ON DELETE CASCADE,
+                proficiency_level INTEGER CHECK (proficiency_level >= 1 AND proficiency_level <= 5),
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(member_id, hobby_id)
+            )
+            "#
+        )
+        .execute(pool)
+        .await?;
+        println!("✅ member_hobbies 테이블 생성 완료");
+
+        println!("📋 member_interests 테이블 생성 중...");
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS bigpicture.member_interests (
+                id SERIAL PRIMARY KEY,
+                member_id INTEGER NOT NULL REFERENCES bigpicture.members(id) ON DELETE CASCADE,
+                interest_id INTEGER NOT NULL REFERENCES bigpicture.interests(id) ON DELETE CASCADE,
+                interest_level INTEGER CHECK (interest_level >= 1 AND interest_level <= 5),
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(member_id, interest_id)
+            )
+            "#
+        )
+        .execute(pool)
+        .await?;
+        println!("✅ member_interests 테이블 생성 완료");
         
         Ok(())
     }
@@ -530,8 +644,8 @@ impl Database {
         
         query.push_str(&format!(" ORDER BY {} {}", sort_column, sort_direction));
         
-        // LIMIT 추가 (기본값 100개)
-        let limit_value = limit.unwrap_or(100);
+        // LIMIT 추가 (기본값 1000개)
+        let limit_value = limit.unwrap_or(5000);
         query.push_str(&format!(" LIMIT {}", limit_value));
         
         info!("   - 최종 SQL 쿼리: {}", query);
@@ -544,6 +658,308 @@ impl Database {
         info!("   - 쿼리 실행 완료: {}개 결과", markers.len());
         
         Ok(markers)
+    }
+
+    /// 회원 등록
+    pub async fn create_member(
+        &self,
+        email: &str,
+        nickname: &str,
+        profile_image_url: Option<&str>,
+        region: Option<&str>,
+        gender: Option<&str>,
+        age: Option<i32>,
+        personality_type: Option<&str>,
+    ) -> Result<Member> {
+        let rec = sqlx::query_as::<_, Member>(
+            r#"
+            INSERT INTO bigpicture.members
+                (email, nickname, profile_image_url, region, gender, age, personality_type)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+            RETURNING *
+            "#
+        )
+        .bind(email)
+        .bind(nickname)
+        .bind(profile_image_url)
+        .bind(region)
+        .bind(gender)
+        .bind(age)
+        .bind(personality_type)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(rec)
+    }
+
+    /// 회원 조회 by id
+    pub async fn get_member_by_id(&self, id: i32) -> Result<Option<Member>> {
+        let rec = sqlx::query_as::<_, Member>(
+            r#"
+            SELECT * FROM bigpicture.members WHERE id = $1
+            "#
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(rec)
+    }
+
+    /// 회원 조회 by email
+    pub async fn get_member_by_email(&self, email: &str) -> Result<Option<Member>> {
+        let rec = sqlx::query_as::<_, Member>(
+            r#"
+            SELECT * FROM bigpicture.members WHERE email = $1
+            "#
+        )
+        .bind(email)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(rec)
+    }
+
+    /// 전체 회원 목록 (limit 옵션)
+    pub async fn list_members(&self, limit: Option<i64>) -> Result<Vec<Member>> {
+        let recs = sqlx::query_as::<_, Member>(
+            r#"
+            SELECT * FROM bigpicture.members ORDER BY id DESC LIMIT $1
+            "#
+        )
+        .bind(limit.unwrap_or(100))
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(recs)
+    }
+
+    /// 소셜 로그인 회원 생성 (트랜잭션으로 처리)
+    pub async fn create_social_member(
+        &self,
+        email: &str,
+        nickname: &str,
+        provider_type: &str,
+        provider_id: &str,
+        provider_email: Option<&str>,
+        profile_image_url: Option<&str>,
+        region: Option<&str>,
+        gender: Option<&str>,
+        age: Option<i32>,
+        personality_type: Option<&str>,
+    ) -> Result<(Member, AuthProvider)> {
+        let mut tx = self.pool.begin().await?;
+        
+        // 1. 회원 생성
+        let member = sqlx::query_as::<_, Member>(
+            r#"
+            INSERT INTO bigpicture.members
+                (email, nickname, profile_image_url, region, gender, age, personality_type, email_verified)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            RETURNING *
+            "#
+        )
+        .bind(email)
+        .bind(nickname)
+        .bind(profile_image_url)
+        .bind(region)
+        .bind(gender)
+        .bind(age)
+        .bind(personality_type)
+        .bind(provider_type != "email") // 소셜 로그인은 이메일 인증 완료로 간주
+        .fetch_one(&mut *tx)
+        .await?;
+
+        // 2. 인증 제공자 정보 생성
+        let auth_provider = sqlx::query_as::<_, AuthProvider>(
+            r#"
+            INSERT INTO bigpicture.auth_providers
+                (member_id, provider_type, provider_id, provider_email)
+            VALUES ($1, $2, $3, $4)
+            RETURNING *
+            "#
+        )
+        .bind(member.id)
+        .bind(provider_type)
+        .bind(provider_id)
+        .bind(provider_email)
+        .fetch_one(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+        Ok((member, auth_provider))
+    }
+
+    /// 이메일/비밀번호 회원 생성
+    pub async fn create_email_member(
+        &self,
+        email: &str,
+        nickname: &str,
+        password_hash: &str,
+        profile_image_url: Option<&str>,
+        region: Option<&str>,
+        gender: Option<&str>,
+        age: Option<i32>,
+        personality_type: Option<&str>,
+    ) -> Result<(Member, AuthProvider)> {
+        let mut tx = self.pool.begin().await?;
+        
+        // 1. 회원 생성
+        let member = sqlx::query_as::<_, Member>(
+            r#"
+            INSERT INTO bigpicture.members
+                (email, nickname, profile_image_url, region, gender, age, personality_type, email_verified)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            RETURNING *
+            "#
+        )
+        .bind(email)
+        .bind(nickname)
+        .bind(profile_image_url)
+        .bind(region)
+        .bind(gender)
+        .bind(age)
+        .bind(personality_type)
+        .bind(false) // 이메일 인증 필요
+        .fetch_one(&mut *tx)
+        .await?;
+
+        // 2. 인증 제공자 정보 생성
+        let auth_provider = sqlx::query_as::<_, AuthProvider>(
+            r#"
+            INSERT INTO bigpicture.auth_providers
+                (member_id, provider_type, provider_id, provider_email, password_hash)
+            VALUES ($1, $2, $3, $4, $5)
+            RETURNING *
+            "#
+        )
+        .bind(member.id)
+        .bind("email")
+        .bind(email) // 이메일을 provider_id로 사용
+        .bind(email)
+        .bind(password_hash)
+        .fetch_one(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+        Ok((member, auth_provider))
+    }
+
+    /// 소셜 로그인으로 기존 회원 찾기
+    pub async fn find_member_by_social_provider(
+        &self,
+        provider_type: &str,
+        provider_id: &str,
+    ) -> Result<Option<(Member, AuthProvider)>> {
+        // 먼저 auth_provider로 member_id 찾기
+        let auth_provider = sqlx::query_as::<_, AuthProvider>(
+            r#"
+            SELECT * FROM bigpicture.auth_providers 
+            WHERE provider_type = $1 AND provider_id = $2
+            "#
+        )
+        .bind(provider_type)
+        .bind(provider_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        
+        if let Some(auth) = auth_provider {
+            // member_id로 회원 정보 찾기
+            let member = sqlx::query_as::<_, Member>(
+                r#"
+                SELECT * FROM bigpicture.members 
+                WHERE id = $1
+                "#
+            )
+            .bind(auth.member_id)
+            .fetch_optional(&self.pool)
+            .await?;
+            
+            if let Some(m) = member {
+                Ok(Some((m, auth)))
+            } else {
+                Ok(None)
+            }
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// 이메일로 기존 회원 찾기
+    pub async fn find_member_by_email(
+        &self,
+        email: &str,
+    ) -> Result<Option<(Member, AuthProvider)>> {
+        // 먼저 이메일로 회원 찾기
+        let member = sqlx::query_as::<_, Member>(
+            r#"
+            SELECT * FROM bigpicture.members 
+            WHERE email = $1
+            "#
+        )
+        .bind(email)
+        .fetch_optional(&self.pool)
+        .await?;
+        
+        if let Some(m) = member {
+            // member_id로 auth_provider 찾기
+            let auth_provider = sqlx::query_as::<_, AuthProvider>(
+                r#"
+                SELECT * FROM bigpicture.auth_providers 
+                WHERE member_id = $1
+                LIMIT 1
+                "#
+            )
+            .bind(m.id)
+            .fetch_optional(&self.pool)
+            .await?;
+            
+            if let Some(auth) = auth_provider {
+                Ok(Some((m, auth)))
+            } else {
+                Ok(None)
+            }
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// 회원의 마지막 로그인 시간 업데이트
+    pub async fn update_last_login(&self, member_id: i32) -> Result<()> {
+        sqlx::query(
+            r#"
+            UPDATE bigpicture.members 
+            SET last_login_at = NOW(), updated_at = NOW()
+            WHERE id = $1
+            "#
+        )
+        .bind(member_id)
+        .execute(&self.pool)
+        .await?;
+        
+        Ok(())
+    }
+
+    /// 회원에게 추가 소셜 로그인 연결
+    pub async fn link_social_provider(
+        &self,
+        member_id: i32,
+        provider_type: &str,
+        provider_id: &str,
+        provider_email: Option<&str>,
+    ) -> Result<AuthProvider> {
+        let auth_provider = sqlx::query_as::<_, AuthProvider>(
+            r#"
+            INSERT INTO bigpicture.auth_providers
+                (member_id, provider_type, provider_id, provider_email)
+            VALUES ($1, $2, $3, $4)
+            RETURNING *
+            "#
+        )
+        .bind(member_id)
+        .bind(provider_type)
+        .bind(provider_id)
+        .bind(provider_email)
+        .fetch_one(&self.pool)
+        .await?;
+
+        Ok(auth_provider)
     }
 }
 
@@ -612,4 +1028,71 @@ pub struct Marker {
     pub thumbnail_img: Option<String>,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
+} 
+
+#[derive(sqlx::FromRow, serde::Serialize, serde::Deserialize, Debug)]
+pub struct Member {
+    pub id: i32,
+    pub email: String,
+    pub nickname: String,
+    pub profile_image_url: Option<String>,
+    pub region: Option<String>,
+    pub gender: Option<String>,
+    pub age: Option<i32>,
+    pub personality_type: Option<String>,
+    pub is_active: bool,
+    pub email_verified: bool,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+    pub last_login_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+#[derive(sqlx::FromRow, serde::Serialize, serde::Deserialize, Debug)]
+pub struct AuthProvider {
+    pub id: i32,
+    pub member_id: i32,
+    pub provider_type: String,
+    pub provider_id: String,
+    pub provider_email: Option<String>,
+    pub password_hash: Option<String>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(sqlx::FromRow, serde::Serialize, serde::Deserialize, Debug)]
+pub struct Hobby {
+    pub id: i32,
+    pub name: String,
+    pub category: Option<String>,
+    pub description: Option<String>,
+    pub is_active: bool,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(sqlx::FromRow, serde::Serialize, serde::Deserialize, Debug)]
+pub struct Interest {
+    pub id: i32,
+    pub name: String,
+    pub category: Option<String>,
+    pub description: Option<String>,
+    pub is_active: bool,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(sqlx::FromRow, serde::Serialize, serde::Deserialize, Debug)]
+pub struct MemberHobby {
+    pub id: i32,
+    pub member_id: i32,
+    pub hobby_id: i32,
+    pub proficiency_level: Option<i32>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(sqlx::FromRow, serde::Serialize, serde::Deserialize, Debug)]
+pub struct MemberInterest {
+    pub id: i32,
+    pub member_id: i32,
+    pub interest_id: i32,
+    pub interest_level: Option<i32>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
 } 

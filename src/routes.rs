@@ -10,7 +10,7 @@ use sqlx::PgPool;
 use log::{info, warn, error};
 
 use crate::image_processor::ImageProcessor;
-use crate::database;
+use crate::database::{Database, Member};
 use crate::config::Config;
 use crate::s3_service::S3Service;
 use crate::s3_routes::{upload_image_s3, upload_circular_thumbnail_s3_internal};
@@ -27,12 +27,64 @@ pub struct ImageResponse {
     pub url: Option<String>,
 }
 
+#[derive(Deserialize)]
+pub struct RegisterMember {
+    pub email: String,
+    pub nickname: String,
+    pub profile_image_url: Option<String>,
+    pub region: Option<String>,
+    pub gender: Option<String>,
+    pub age: Option<i32>,
+    pub personality_type: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct RegisterSocialMember {
+    pub email: String,
+    pub nickname: String,
+    pub provider_type: String, // "google", "kakao", "email"
+    pub provider_id: String,
+    pub provider_email: Option<String>,
+    pub password: Option<String>, // 이메일 로그인시에만 필요
+    pub profile_image_url: Option<String>,
+    pub region: Option<String>,
+    pub gender: Option<String>,
+    pub age: Option<i32>,
+    pub personality_type: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct LoginRequest {
+    pub email: String,
+    pub password: String,
+}
+
+#[derive(Deserialize)]
+pub struct SocialLoginRequest {
+    pub provider_type: String,
+    pub provider_id: String,
+    pub provider_email: Option<String>,
+    pub nickname: Option<String>,
+    pub profile_image_url: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct ListMembersQuery {
+    pub limit: Option<i64>,
+}
+
 pub fn setup_routes(config: &mut web::ServiceConfig) {
     config
         .service(
             web::scope("/api")
                 .route("/health", web::get().to(health_check))
                 .route("/markers", web::get().to(get_markers))
+                .route("/members", web::post().to(register_member))
+                .route("/members", web::get().to(list_members))
+                .route("/members/{id}", web::get().to(get_member_by_id))
+                .route("/auth/register", web::post().to(register_social_member))
+                .route("/auth/login", web::post().to(login_member))
+                .route("/auth/social-login", web::post().to(social_login))
                 .service(
                     web::scope("/images")
                         .route("/upload/thumbnail", web::post().to(upload_thumbnail))
@@ -100,7 +152,7 @@ async fn get_markers(
     info!("   - sort_order: {:?}", query.sort_order);
     info!("   - limit: {:?}", query.limit);
     
-    let db = database::Database { pool: pool.get_ref().clone() };
+    let db = Database { pool: pool.get_ref().clone() };
     
     // 감성 태그 파싱
     let emotion_tags = query.emotion_tags.as_ref().map(|tags| {
@@ -370,7 +422,7 @@ async fn upload_circular_thumbnail(
     }
 
     // DB에 원본 이미지 정보 저장
-    let db = database::Database { pool: pool.get_ref().clone() };
+    let db = Database { pool: pool.get_ref().clone() };
     let orig_size = processor.get_file_size_mb(&image_data);
     let (orig_width, orig_height, orig_format) = match processor.get_image_info(&image_data) {
         Ok(info) => info,
@@ -574,7 +626,7 @@ async fn upload_image(
     }
 
     // DB에 원본 이미지 정보 저장
-    let db = database::Database { pool: pool.get_ref().clone() };
+    let db = Database { pool: pool.get_ref().clone() };
     let orig_size = processor.get_file_size_mb(&image_data);
     let (orig_width, orig_height, orig_format) = match processor.get_image_info(&image_data) {
         Ok(info) => info,
@@ -809,7 +861,7 @@ async fn list_images(
     let image_type = query.get("type");
     
     let rows = if let Some(img_type) = image_type {
-        sqlx::query_as::<_, database::ImageInfo>(
+        sqlx::query_as::<_, crate::database::ImageInfo>(
             r#"
             SELECT id, filename, original_filename, file_path, file_size_mb, 
                    width, height, format, image_type, created_at, updated_at
@@ -822,7 +874,7 @@ async fn list_images(
         .fetch_all(pool.get_ref())
         .await
     } else {
-        sqlx::query_as::<_, database::ImageInfo>(
+        sqlx::query_as::<_, crate::database::ImageInfo>(
             r#"
             SELECT id, filename, original_filename, file_path, file_size_mb, 
                    width, height, format, image_type, created_at, updated_at
@@ -903,4 +955,309 @@ async fn get_image_stats(pool: web::Data<PgPool>) -> Result<HttpResponse> {
             }
         }
     })))
+} 
+
+async fn register_member(
+    db: web::Data<Database>,
+    payload: web::Json<RegisterMember>,
+) -> Result<HttpResponse> {
+    let input = payload.into_inner();
+    match db.create_member(
+        &input.email,
+        &input.nickname,
+        input.profile_image_url.as_deref(),
+        input.region.as_deref(),
+        input.gender.as_deref(),
+        input.age,
+        input.personality_type.as_deref(),
+    ).await {
+        Ok(member) => Ok(HttpResponse::Ok().json(serde_json::json!({
+            "success": true,
+            "data": member
+        }))),
+        Err(e) => Ok(HttpResponse::InternalServerError().json(serde_json::json!({
+            "success": false,
+            "message": format!("회원 등록 실패: {}", e)
+        }))),
+    }
+}
+
+async fn get_member_by_id(
+    db: web::Data<Database>,
+    path: web::Path<i32>,
+) -> Result<HttpResponse> {
+    let id = path.into_inner();
+    match db.get_member_by_id(id).await {
+        Ok(Some(member)) => Ok(HttpResponse::Ok().json(serde_json::json!({
+            "success": true,
+            "data": member
+        }))),
+        Ok(None) => Ok(HttpResponse::NotFound().json(serde_json::json!({
+            "success": false,
+            "message": "회원이 존재하지 않습니다."
+        }))),
+        Err(e) => Ok(HttpResponse::InternalServerError().json(serde_json::json!({
+            "success": false,
+            "message": format!("회원 조회 실패: {}", e)
+        }))),
+    }
+}
+
+async fn list_members(
+    db: web::Data<Database>,
+    query: web::Query<ListMembersQuery>,
+) -> Result<HttpResponse> {
+    let limit = query.limit;
+    match db.list_members(limit).await {
+        Ok(members) => Ok(HttpResponse::Ok().json(serde_json::json!({
+            "success": true,
+            "data": members
+        }))),
+        Err(e) => Ok(HttpResponse::InternalServerError().json(serde_json::json!({
+            "success": false,
+            "message": format!("회원 목록 조회 실패: {}", e)
+        }))),
+    }
+}
+
+/// 소셜 로그인 회원가입 (구글, 카카오, 이메일)
+async fn register_social_member(
+    db: web::Data<Database>,
+    payload: web::Json<RegisterSocialMember>,
+) -> Result<HttpResponse> {
+    let input = payload.into_inner();
+    
+    info!("🔐 소셜 회원가입 요청:");
+    info!("   - 이메일: {}", input.email);
+    info!("   - 닉네임: {}", input.nickname);
+    info!("   - 제공자: {}", input.provider_type);
+    info!("   - 제공자 ID: {}", input.provider_id);
+    
+    // 1. 이미 존재하는 소셜 계정인지 확인
+    if let Ok(Some((existing_member, existing_auth))) = db.find_member_by_social_provider(&input.provider_type, &input.provider_id).await {
+        info!("✅ 기존 소셜 계정 발견, 로그인 처리");
+        
+        // 마지막 로그인 시간 업데이트
+        if let Err(e) = db.update_last_login(existing_member.id).await {
+            warn!("⚠️ 마지막 로그인 시간 업데이트 실패: {}", e);
+        }
+        
+        return Ok(HttpResponse::Ok().json(serde_json::json!({
+            "success": true,
+            "message": "기존 계정으로 로그인 성공",
+            "data": {
+                "member": existing_member,
+                "auth_provider": existing_auth,
+                "is_new_user": false
+            }
+        })));
+    }
+    
+    // 2. 같은 이메일로 가입된 계정이 있는지 확인
+    if let Ok(Some((existing_member, existing_auth))) = db.find_member_by_email(&input.email).await {
+        info!("📧 같은 이메일의 기존 계정 발견");
+        
+        // 기존 계정에 새로운 소셜 로그인 연결
+        match db.link_social_provider(
+            existing_member.id,
+            &input.provider_type,
+            &input.provider_id,
+            input.provider_email.as_deref(),
+        ).await {
+            Ok(new_auth) => {
+                info!("✅ 기존 계정에 소셜 로그인 연결 성공");
+                return Ok(HttpResponse::Ok().json(serde_json::json!({
+                    "success": true,
+                    "message": "기존 계정에 소셜 로그인 연결 성공",
+                    "data": {
+                        "member": existing_member,
+                        "auth_provider": new_auth,
+                        "is_new_user": false
+                    }
+                })));
+            }
+            Err(e) => {
+                error!("❌ 소셜 로그인 연결 실패: {}", e);
+                return Ok(HttpResponse::InternalServerError().json(serde_json::json!({
+                    "success": false,
+                    "message": format!("소셜 로그인 연결 실패: {}", e)
+                })));
+            }
+        }
+    }
+    
+    // 3. 새로운 회원 생성
+    let result = match input.provider_type.as_str() {
+        "email" => {
+            // 이메일/비밀번호 회원가입
+            let password_hash = input.password.ok_or_else(|| {
+                actix_web::error::ErrorBadRequest("이메일 로그인시 비밀번호가 필요합니다")
+            })?;
+            
+            // 실제로는 비밀번호 해싱이 필요하지만 여기서는 간단히 처리
+            db.create_email_member(
+                &input.email,
+                &input.nickname,
+                &password_hash, // 실제로는 해시된 비밀번호
+                input.profile_image_url.as_deref(),
+                input.region.as_deref(),
+                input.gender.as_deref(),
+                input.age,
+                input.personality_type.as_deref(),
+            ).await
+        }
+        "google" | "kakao" | "naver" | "meta" => {
+            // 소셜 로그인 회원가입
+            db.create_social_member(
+                &input.email,
+                &input.nickname,
+                &input.provider_type,
+                &input.provider_id,
+                input.provider_email.as_deref(),
+                input.profile_image_url.as_deref(),
+                input.region.as_deref(),
+                input.gender.as_deref(),
+                input.age,
+                input.personality_type.as_deref(),
+            ).await
+        }
+        _ => {
+            return Ok(HttpResponse::BadRequest().json(serde_json::json!({
+                "success": false,
+                "message": "지원하지 않는 로그인 제공자입니다. (email, google, kakao, naver, meta)"
+            })));
+        }
+    };
+    
+    match result {
+        Ok((member, auth_provider)) => {
+            info!("✅ 새로운 회원 생성 성공: ID {}", member.id);
+            Ok(HttpResponse::Ok().json(serde_json::json!({
+                "success": true,
+                "message": "회원가입 성공",
+                "data": {
+                    "member": member,
+                    "auth_provider": auth_provider,
+                    "is_new_user": true
+                }
+            })))
+        }
+        Err(e) => {
+            error!("❌ 회원가입 실패: {}", e);
+            Ok(HttpResponse::InternalServerError().json(serde_json::json!({
+                "success": false,
+                "message": format!("회원가입 실패: {}", e)
+            })))
+        }
+    }
+}
+
+/// 이메일/비밀번호 로그인
+async fn login_member(
+    db: web::Data<Database>,
+    payload: web::Json<LoginRequest>,
+) -> Result<HttpResponse> {
+    let input = payload.into_inner();
+    
+    info!("🔐 이메일 로그인 요청: {}", input.email);
+    
+    // 이메일로 회원 찾기
+    match db.find_member_by_email(&input.email).await {
+        Ok(Some((member, auth_provider))) => {
+            // 비밀번호 검증 (실제로는 해시 비교가 필요)
+            if auth_provider.provider_type == "email" {
+                // 실제로는 bcrypt나 argon2로 비밀번호 검증
+                if let Some(stored_hash) = &auth_provider.password_hash {
+                    if stored_hash == &input.password { // 실제로는 해시 비교
+                        // 마지막 로그인 시간 업데이트
+                        if let Err(e) = db.update_last_login(member.id).await {
+                            warn!("⚠️ 마지막 로그인 시간 업데이트 실패: {}", e);
+                        }
+                        
+                        info!("✅ 이메일 로그인 성공: {}", input.email);
+                        return Ok(HttpResponse::Ok().json(serde_json::json!({
+                            "success": true,
+                            "message": "로그인 성공",
+                            "data": {
+                                "member": member,
+                                "auth_provider": auth_provider
+                            }
+                        })));
+                    }
+                }
+            }
+            
+            Ok(HttpResponse::Unauthorized().json(serde_json::json!({
+                "success": false,
+                "message": "이메일 또는 비밀번호가 올바르지 않습니다"
+            })))
+        }
+        Ok(None) => {
+            info!("❌ 존재하지 않는 이메일: {}", input.email);
+            Ok(HttpResponse::Unauthorized().json(serde_json::json!({
+                "success": false,
+                "message": "이메일 또는 비밀번호가 올바르지 않습니다"
+            })))
+        }
+        Err(e) => {
+            error!("❌ 로그인 처리 실패: {}", e);
+            Ok(HttpResponse::InternalServerError().json(serde_json::json!({
+                "success": false,
+                "message": format!("로그인 처리 실패: {}", e)
+            })))
+        }
+    }
+}
+
+/// 소셜 로그인 (기존 계정 확인)
+async fn social_login(
+    db: web::Data<Database>,
+    payload: web::Json<SocialLoginRequest>,
+) -> Result<HttpResponse> {
+    let input = payload.into_inner();
+    
+    info!("🔐 소셜 로그인 요청:");
+    info!("   - 제공자: {}", input.provider_type);
+    info!("   - 제공자 ID: {}", input.provider_id);
+    
+    // 소셜 제공자로 기존 회원 찾기
+    match db.find_member_by_social_provider(&input.provider_type, &input.provider_id).await {
+        Ok(Some((member, auth_provider))) => {
+            // 마지막 로그인 시간 업데이트
+            if let Err(e) = db.update_last_login(member.id).await {
+                warn!("⚠️ 마지막 로그인 시간 업데이트 실패: {}", e);
+            }
+            
+            info!("✅ 소셜 로그인 성공: {}", member.email);
+            Ok(HttpResponse::Ok().json(serde_json::json!({
+                "success": true,
+                "message": "소셜 로그인 성공",
+                "data": {
+                    "member": member,
+                    "auth_provider": auth_provider
+                }
+            })))
+        }
+        Ok(None) => {
+            info!("❌ 등록되지 않은 소셜 계정");
+            Ok(HttpResponse::NotFound().json(serde_json::json!({
+                "success": false,
+                "message": "등록되지 않은 소셜 계정입니다. 회원가입을 먼저 진행해주세요.",
+                "data": {
+                    "provider_type": input.provider_type,
+                    "provider_id": input.provider_id,
+                    "provider_email": input.provider_email,
+                    "nickname": input.nickname,
+                    "profile_image_url": input.profile_image_url
+                }
+            })))
+        }
+        Err(e) => {
+            error!("❌ 소셜 로그인 처리 실패: {}", e);
+            Ok(HttpResponse::InternalServerError().json(serde_json::json!({
+                "success": false,
+                "message": format!("소셜 로그인 처리 실패: {}", e)
+            })))
+        }
+    }
 } 

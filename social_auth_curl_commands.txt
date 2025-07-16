@@ -1,0 +1,216 @@
+# BigPicture 소셜 로그인 API 테스트 명령어
+
+## 1. 구글 소셜 로그인 회원가입
+curl -X POST http://localhost:5500/api/auth/register \
+  -H "Content-Type: application/json" \
+  -d '{
+    "email": "user@gmail.com",
+    "nickname": "구글유저",
+    "provider_type": "google",
+    "provider_id": "google_123456789",
+    "provider_email": "user@gmail.com",
+    "profile_image_url": "https://lh3.googleusercontent.com/a/example",
+    "region": "서울",
+    "gender": "male",
+    "age": 25,
+    "personality_type": "ENFP"
+  }'
+
+## 2. 카카오 소셜 로그인 회원가입
+curl -X POST http://localhost:5500/api/auth/register \
+  -H "Content-Type: application/json" \
+  -d '{
+    "email": "user@kakao.com",
+    "nickname": "카카오유저",
+    "provider_type": "kakao",
+    "provider_id": "kakao_987654321",
+    "provider_email": "user@kakao.com",
+    "profile_image_url": "http://k.kakaocdn.net/example.jpg",
+    "region": "부산",
+    "gender": "female",
+    "age": 30,
+    "personality_type": "ISTJ"
+  }'
+
+## 3. 이메일/비밀번호 회원가입
+curl -X POST http://localhost:5500/api/auth/register \
+  -H "Content-Type: application/json" \
+  -d '{
+    "email": "user@example.com",
+    "nickname": "이메일유저",
+    "provider_type": "email",
+    "provider_id": "user@example.com",
+    "provider_email": "user@example.com",
+    "password": "mypassword123",
+    "profile_image_url": "https://example.com/profile.jpg",
+    "region": "대구",
+    "gender": "other",
+    "age": 28,
+    "personality_type": "INTJ"
+  }'
+
+## 4. 네이버 소셜 로그인 회원가입
+curl -X POST http://localhost:5500/api/auth/register \
+  -H "Content-Type: application/json" \
+  -d '{
+    "email": "user@naver.com",
+    "nickname": "네이버유저",
+    "provider_type": "naver",
+    "provider_id": "naver_555666777",
+    "provider_email": "user@naver.com",
+    "profile_image_url": "https://ssl.pstatic.net/static/pwe/address/img_profile.png",
+    "region": "인천",
+    "gender": "prefer_not_to_say",
+    "age": 35,
+    "personality_type": "ESFP"
+  }'
+
+## 5. 이메일/비밀번호 로그인
+curl -X POST http://localhost:5500/api/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{
+    "email": "user@example.com",
+    "password": "mypassword123"
+  }'
+
+## 6. 소셜 로그인 (기존 계정 확인)
+curl -X POST http://localhost:5500/api/auth/social-login \
+  -H "Content-Type: application/json" \
+  -d '{
+    "provider_type": "google",
+    "provider_id": "google_123456789",
+    "provider_email": "user@gmail.com",
+    "nickname": "구글유저",
+    "profile_image_url": "https://lh3.googleusercontent.com/a/example"
+  }'
+
+## 7. 카카오 소셜 로그인
+curl -X POST http://localhost:5500/api/auth/social-login \
+  -H "Content-Type: application/json" \
+  -d '{
+    "provider_type": "kakao",
+    "provider_id": "kakao_987654321",
+    "provider_email": "user@kakao.com",
+    "nickname": "카카오유저",
+    "profile_image_url": "http://k.kakaocdn.net/example.jpg"
+  }'
+
+## 8. 기존 회원 목록 조회
+curl -X GET "http://localhost:5500/api/members?limit=10"
+
+## 9. 특정 회원 조회
+curl -X GET http://localhost:5500/api/members/1
+
+## 10. 같은 이메일로 다른 소셜 로그인 연결 테스트
+# 먼저 구글로 가입한 후, 같은 이메일로 카카오 로그인 시도
+curl -X POST http://localhost:5500/api/auth/register \
+  -H "Content-Type: application/json" \
+  -d '{
+    "email": "user@gmail.com",
+    "nickname": "구글유저",
+    "provider_type": "kakao",
+    "provider_id": "kakao_new_account",
+    "provider_email": "user@gmail.com",
+    "profile_image_url": "http://k.kakaocdn.net/new.jpg"
+  }'
+
+## 11. 잘못된 제공자 타입 테스트
+curl -X POST http://localhost:5500/api/auth/register \
+  -H "Content-Type: application/json" \
+  -d '{
+    "email": "user@invalid.com",
+    "nickname": "잘못된유저",
+    "provider_type": "invalid_provider",
+    "provider_id": "invalid_123",
+    "provider_email": "user@invalid.com"
+  }'
+
+## 12. 이메일 로그인시 비밀번호 누락 테스트
+curl -X POST http://localhost:5500/api/auth/register \
+  -H "Content-Type: application/json" \
+  -d '{
+    "email": "user@nopassword.com",
+    "nickname": "비밀번호없는유저",
+    "provider_type": "email",
+    "provider_id": "user@nopassword.com",
+    "provider_email": "user@nopassword.com"
+  }'
+
+## 응답 예시:
+
+### 성공적인 회원가입 응답:
+```json
+{
+  "success": true,
+  "message": "회원가입 성공",
+  "data": {
+    "member": {
+      "id": 1,
+      "email": "user@gmail.com",
+      "nickname": "구글유저",
+      "profile_image_url": "https://lh3.googleusercontent.com/a/example",
+      "region": "서울",
+      "gender": "male",
+      "age": 25,
+      "personality_type": "ENFP",
+      "is_active": true,
+      "email_verified": true,
+      "created_at": "2024-01-01T00:00:00Z",
+      "updated_at": "2024-01-01T00:00:00Z",
+      "last_login_at": null
+    },
+    "auth_provider": {
+      "id": 1,
+      "member_id": 1,
+      "provider_type": "google",
+      "provider_id": "google_123456789",
+      "provider_email": "user@gmail.com",
+      "password_hash": null,
+      "created_at": "2024-01-01T00:00:00Z",
+      "updated_at": "2024-01-01T00:00:00Z"
+    },
+    "is_new_user": true
+  }
+}
+```
+
+### 기존 계정 로그인 응답:
+```json
+{
+  "success": true,
+  "message": "기존 계정으로 로그인 성공",
+  "data": {
+    "member": { ... },
+    "auth_provider": { ... },
+    "is_new_user": false
+  }
+}
+```
+
+### 소셜 로그인 연결 응답:
+```json
+{
+  "success": true,
+  "message": "기존 계정에 소셜 로그인 연결 성공",
+  "data": {
+    "member": { ... },
+    "auth_provider": { ... },
+    "is_new_user": false
+  }
+}
+```
+
+### 등록되지 않은 소셜 계정 응답:
+```json
+{
+  "success": false,
+  "message": "등록되지 않은 소셜 계정입니다. 회원가입을 먼저 진행해주세요.",
+  "data": {
+    "provider_type": "google",
+    "provider_id": "new_google_id",
+    "provider_email": "new@gmail.com",
+    "nickname": "새유저",
+    "profile_image_url": "https://example.com/profile.jpg"
+  }
+}
+``` 
