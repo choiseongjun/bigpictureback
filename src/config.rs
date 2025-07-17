@@ -33,6 +33,12 @@ pub struct Config {
     pub s3_region: String,
     pub s3_access_key_id: String,
     pub s3_secret_access_key: String,
+    // JWT
+    pub jwt_secret: String,
+    
+    // OAuth
+    pub google_client_id: String,
+    pub google_client_ids: Vec<String>,
 }
 
 impl Config {
@@ -100,6 +106,17 @@ impl Config {
             s3_region: env::var("S3_REGION").unwrap_or_else(|_| "ap-northeast-2".to_string()),
             s3_access_key_id: env::var("AWS_ACCESS_KEY_ID").unwrap_or_else(|_| "".to_string()),
             s3_secret_access_key: env::var("AWS_SECRET_ACCESS_KEY").unwrap_or_else(|_| "".to_string()),
+            // JWT
+            jwt_secret: env::var("JWT_SECRET").unwrap_or_else(|_| "changemechangemechangeme".to_string()),
+            
+            // OAuth
+            google_client_id: env::var("GOOGLE_CLIENT_ID").unwrap_or_else(|_| "your-google-client-id".to_string()),
+            google_client_ids: env::var("GOOGLE_CLIENT_IDS")
+                .unwrap_or_else(|_| "".to_string())
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect(),
         })
     }
     

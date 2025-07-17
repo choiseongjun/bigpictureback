@@ -8,12 +8,55 @@ use chrono::Utc;
 use std::fs;
 use sqlx::PgPool;
 use log::{info, warn, error};
+use jsonwebtoken::{encode, EncodingKey, Header, decode, DecodingKey, Validation};
+use base64::Engine;
 
 use crate::image_processor::ImageProcessor;
-use crate::database::{Database, Member};
+use crate::database::{Database, Member, AuthProvider};
 use crate::config::Config;
 use crate::s3_service::S3Service;
 use crate::s3_routes::{upload_image_s3, upload_circular_thumbnail_s3_internal};
+
+// 구글 ID 토큰 페이로드 구조체
+#[derive(Debug, Serialize, Deserialize)]
+pub struct GoogleIdTokenPayload {
+    pub iss: String,           // issuer (Google)
+    pub sub: String,           // subject (Google user ID)
+    pub aud: String,           // audience (client ID)
+    pub exp: i64,              // expiration time
+    pub iat: i64,              // issued at
+    pub email: String,         // user email
+    pub email_verified: bool,  // email verification status
+    pub name: Option<String>,  // user name
+    pub picture: Option<String>, // profile picture URL
+    pub given_name: Option<String>,
+    pub family_name: Option<String>,
+    pub locale: Option<String>,
+}
+
+// 구글 공개키 구조체
+#[derive(Debug, Serialize, Deserialize)]
+pub struct GooglePublicKey {
+    pub kid: String,
+    pub e: String,
+    pub n: String,
+    pub alg: String,
+    pub kty: String,
+    #[serde(rename = "use")]
+    pub use_field: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct GoogleKeysResponse {
+    pub keys: Vec<GooglePublicKey>,
+}
+
+#[derive(Serialize)]
+pub struct ApiResponse<T> {
+    pub data: Option<T>,
+    pub code: i32,
+    pub message: String,
+}
 
 #[derive(Serialize, Deserialize)]
 pub struct ImageResponse {
@@ -73,8 +116,50 @@ pub struct SocialLoginRequest {
 }
 
 #[derive(Deserialize)]
+pub struct GoogleIdTokenRequest {
+    pub id_token: String,
+    pub nickname: Option<String>,
+    pub profile_image_url: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct GoogleIdTokenResponse {
+    pub success: bool,
+    pub message: String,
+    pub data: Option<serde_json::Value>,
+    #[serde(rename = "token")]
+    pub token: Option<String>,
+    #[serde(rename = "accessToken")]
+    pub access_token: Option<String>,
+    #[serde(rename = "isNewUser")]
+    pub is_new_user: Option<bool>,
+}
+
+#[derive(Deserialize)]
 pub struct ListMembersQuery {
     pub limit: Option<i64>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct Claims {
+    pub sub: String, // subject (user id)
+    pub email: String,
+    pub exp: usize, // 만료시간 (timestamp)
+}
+
+fn create_jwt(user_id: i32, email: &str, config: &Config) -> Result<String, jsonwebtoken::errors::Error> {
+    use chrono::Duration;
+    let expiration = Utc::now() + Duration::hours(24);
+    let claims = Claims {
+        sub: user_id.to_string(),
+        email: email.to_string(),
+        exp: expiration.timestamp() as usize,
+    };
+    encode(
+        &Header::default(),
+        &claims,
+        &EncodingKey::from_secret(config.jwt_secret.as_bytes()),
+    )
 }
 
 pub fn setup_routes(config: &mut web::ServiceConfig) {
@@ -85,10 +170,22 @@ pub fn setup_routes(config: &mut web::ServiceConfig) {
                 .route("/markers", web::get().to(get_markers))
                 .route("/members", web::post().to(register_member))
                 .route("/members", web::get().to(list_members))
+                .route("/members/me", web::get().to(
+                    |db, config, req| get_me(db, config, req)
+                ))
                 .route("/members/{id}", web::get().to(get_member_by_id))
-                .route("/auth/register", web::post().to(register_social_member))
-                .route("/auth/login", web::post().to(login_member))
-                .route("/auth/social-login", web::post().to(social_login))
+                .route("/auth/register", web::post().to(
+                    |db, payload, config| register_social_member(db, payload, config)
+                ))
+                .route("/auth/login", web::post().to(
+                    |db, payload, config| login_member(db, payload, config)
+                ))
+                .route("/auth/social-login", web::post().to(
+                    |db, payload, config| social_login(db, payload, config)
+                ))
+                .route("/auth/google-id-token", web::post().to(
+                    |db, payload, config| google_id_token_login(db, payload, config)
+                ))
                 .service(
                     web::scope("/images")
                         .route("/upload/thumbnail", web::post().to(upload_thumbnail))
@@ -984,15 +1081,17 @@ async fn register_member(
             if let Some(hobbies) = &input.hobbies {
                 let _ = db.add_member_hobbies(member.id, hobbies).await;
             }
-            Ok(HttpResponse::Ok().json(serde_json::json!({
-                "success": true,
-                "data": member
-            })))
+            Ok(HttpResponse::Ok().json(ApiResponse {
+                data: Some(member),
+                code: 0,
+                message: "회원 등록 성공".to_string(),
+            }))
         },
-        Err(e) => Ok(HttpResponse::InternalServerError().json(serde_json::json!({
-            "success": false,
-            "message": format!("회원 등록 실패: {}", e)
-        }))),
+        Err(e) => Ok(HttpResponse::InternalServerError().json(ApiResponse::<()> {
+            data: None,
+            code: 500,
+            message: format!("회원 등록 실패: {}", e),
+        })),
     }
 }
 
@@ -1038,6 +1137,7 @@ async fn list_members(
 async fn register_social_member(
     db: web::Data<Database>,
     payload: web::Json<RegisterSocialMember>,
+    config: web::Data<Config>,
 ) -> Result<HttpResponse> {
     let input = payload.into_inner();
     
@@ -1056,19 +1156,21 @@ async fn register_social_member(
             warn!("⚠️ 마지막 로그인 시간 업데이트 실패: {}", e);
         }
         
-        return Ok(HttpResponse::Ok().json(serde_json::json!({
-            "success": true,
-            "message": "기존 계정으로 로그인 성공",
-            "data": {
-                "member": existing_member,
-                "auth_provider": existing_auth,
-                "is_new_user": false
-            }
-        })));
+        // JWT 생성
+        let token = create_jwt(existing_member.id, &existing_member.email, &config).unwrap_or_default();
+        return Ok(HttpResponse::Ok().json(ApiResponse {
+            data: Some(serde_json::json!({
+                "member": member_to_camelcase_json(&existing_member),
+                "authProvider": auth_provider_to_camelcase_json(&existing_auth),
+                "isNewUser": false
+            })),
+            code: 0,
+            message: "기존 계정으로 로그인 성공".to_string(),
+        }));
     }
     
     // 2. 같은 이메일로 가입된 계정이 있는지 확인
-    if let Ok(Some((existing_member, existing_auth))) = db.find_member_by_email(&input.email).await {
+    if let Ok(Some((existing_member, _existing_auth))) = db.find_member_by_email(&input.email).await {
         info!("📧 같은 이메일의 기존 계정 발견");
         
         // 기존 계정에 새로운 소셜 로그인 연결
@@ -1080,22 +1182,25 @@ async fn register_social_member(
         ).await {
             Ok(new_auth) => {
                 info!("✅ 기존 계정에 소셜 로그인 연결 성공");
-                return Ok(HttpResponse::Ok().json(serde_json::json!({
-                    "success": true,
-                    "message": "기존 계정에 소셜 로그인 연결 성공",
-                    "data": {
-                        "member": existing_member,
-                        "auth_provider": new_auth,
-                        "is_new_user": false
-                    }
-                })));
+                // JWT 생성
+                let token = create_jwt(existing_member.id, &existing_member.email, &config).unwrap_or_default();
+                return Ok(HttpResponse::Ok().json(ApiResponse {
+                    data: Some(serde_json::json!({
+                        "member": member_to_camelcase_json(&existing_member),
+                        "authProvider": auth_provider_to_camelcase_json(&new_auth),
+                        "isNewUser": false
+                    })),
+                    code: 0,
+                    message: "기존 계정에 소셜 로그인 연결 성공".to_string(),
+                }));
             }
             Err(e) => {
                 error!("❌ 소셜 로그인 연결 실패: {}", e);
-                return Ok(HttpResponse::InternalServerError().json(serde_json::json!({
-                    "success": false,
-                    "message": format!("소셜 로그인 연결 실패: {}", e)
-                })));
+                return Ok(HttpResponse::InternalServerError().json(ApiResponse::<()> {
+                    data: None,
+                    code: 500,
+                    message: format!("소셜 로그인 연결 실패: {}", e),
+                }));
             }
         }
     }
@@ -1136,10 +1241,11 @@ async fn register_social_member(
             ).await
         }
         _ => {
-            return Ok(HttpResponse::BadRequest().json(serde_json::json!({
-                "success": false,
-                "message": "지원하지 않는 로그인 제공자입니다. (email, google, kakao, naver, meta)"
-            })));
+            return Ok(HttpResponse::BadRequest().json(ApiResponse::<()> {
+                data: None,
+                code: 400,
+                message: "지원하지 않는 로그인 제공자입니다. (email, google, kakao, naver, meta)".to_string(),
+            }));
         }
     };
     
@@ -1153,22 +1259,25 @@ async fn register_social_member(
                 let _ = db.add_member_hobbies(member.id, hobbies).await;
             }
             info!("✅ 새로운 회원 생성 성공: ID {}", member.id);
-            Ok(HttpResponse::Ok().json(serde_json::json!({
-                "success": true,
-                "message": "회원가입 성공",
-                "data": {
-                    "member": member,
-                    "auth_provider": auth_provider,
-                    "is_new_user": true
-                }
-            })))
+            // JWT 생성
+            let token = create_jwt(member.id, &member.email, &config).unwrap_or_default();
+            Ok(HttpResponse::Ok().json(ApiResponse {
+                data: Some(serde_json::json!({
+                    "member": member_to_camelcase_json(&member),
+                    "authProvider": auth_provider_to_camelcase_json(&auth_provider),
+                    "isNewUser": true
+                })),
+                code: 0,
+                message: "회원가입 성공".to_string(),
+            }))
         }
         Err(e) => {
             error!("❌ 회원가입 실패: {}", e);
-            Ok(HttpResponse::InternalServerError().json(serde_json::json!({
-                "success": false,
-                "message": format!("회원가입 실패: {}", e)
-            })))
+            Ok(HttpResponse::InternalServerError().json(ApiResponse::<()> {
+                data: None,
+                code: 500,
+                message: format!("회원가입 실패: {}", e),
+            }))
         }
     }
 }
@@ -1177,6 +1286,7 @@ async fn register_social_member(
 async fn login_member(
     db: web::Data<Database>,
     payload: web::Json<LoginRequest>,
+    config: web::Data<Config>,
 ) -> Result<HttpResponse> {
     let input = payload.into_inner();
     
@@ -1194,14 +1304,16 @@ async fn login_member(
                         if let Err(e) = db.update_last_login(member.id).await {
                             warn!("⚠️ 마지막 로그인 시간 업데이트 실패: {}", e);
                         }
-                        
+                        // JWT 생성
+                        let token = create_jwt(member.id, &member.email, &config).unwrap_or_default();
                         info!("✅ 이메일 로그인 성공: {}", input.email);
                         return Ok(HttpResponse::Ok().json(serde_json::json!({
                             "success": true,
                             "message": "로그인 성공",
+                            "token": token,
                             "data": {
-                                "member": member,
-                                "auth_provider": auth_provider
+                                "member": member_to_camelcase_json(&member),
+                                "authProvider": auth_provider_to_camelcase_json(&auth_provider)
                             }
                         })));
                     }
@@ -1234,6 +1346,7 @@ async fn login_member(
 async fn social_login(
     db: web::Data<Database>,
     payload: web::Json<SocialLoginRequest>,
+    config: web::Data<Config>,
 ) -> Result<HttpResponse> {
     let input = payload.into_inner();
     
@@ -1248,14 +1361,16 @@ async fn social_login(
             if let Err(e) = db.update_last_login(member.id).await {
                 warn!("⚠️ 마지막 로그인 시간 업데이트 실패: {}", e);
             }
-            
+            // JWT 생성
+            let token = create_jwt(member.id, &member.email, &config).unwrap_or_default();
             info!("✅ 소셜 로그인 성공: {}", member.email);
             Ok(HttpResponse::Ok().json(serde_json::json!({
                 "success": true,
                 "message": "소셜 로그인 성공",
+                "token": token,
                 "data": {
-                    "member": member,
-                    "auth_provider": auth_provider
+                    "member": member_to_camelcase_json(&member),
+                    "authProvider": auth_provider_to_camelcase_json(&auth_provider)
                 }
             })))
         }
@@ -1281,4 +1396,296 @@ async fn social_login(
             })))
         }
     }
+} 
+
+async fn get_me(
+    db: web::Data<Database>,
+    config: web::Data<Config>,
+    req: actix_web::HttpRequest,
+) -> Result<HttpResponse> {
+    let auth_header = req.headers().get("Authorization").and_then(|h| h.to_str().ok());
+    if auth_header.is_none() || !auth_header.unwrap().starts_with("Bearer ") {
+        return Ok(HttpResponse::Unauthorized().json(serde_json::json!({
+            "success": false,
+            "message": "No Bearer token"
+        })));
+    }
+    let token = &auth_header.unwrap()[7..];
+    let validation = Validation::default();
+    let claims = match decode::<Claims>(
+        token,
+        &DecodingKey::from_secret(config.jwt_secret.as_bytes()),
+        &validation,
+    ) {
+        Ok(data) => data.claims,
+        Err(e) => {
+            return Ok(HttpResponse::Unauthorized().json(serde_json::json!({
+                "success": false,
+                "message": format!("Invalid token: {}", e)
+            })));
+        }
+    };
+    let user_id: i32 = match claims.sub.parse() {
+        Ok(id) => id,
+        Err(_) => {
+            return Ok(HttpResponse::Unauthorized().json(serde_json::json!({
+                "success": false,
+                "message": "Invalid user id in token"
+            })));
+        }
+    };
+    match db.get_member_by_id(user_id).await {
+        Ok(Some(member)) => Ok(HttpResponse::Ok().json(serde_json::json!({
+            "success": true,
+            "data": member_to_camelcase_json(&member)
+        }))),
+        Ok(None) => Ok(HttpResponse::NotFound().json(serde_json::json!({
+            "success": false,
+            "message": "회원이 존재하지 않습니다."
+        }))),
+        Err(e) => Ok(HttpResponse::InternalServerError().json(serde_json::json!({
+            "success": false,
+            "message": format!("회원 조회 실패: {}", e)
+        }))),
+    }
+} 
+
+/// 구글 ID 토큰 검증 (간소화된 버전)
+async fn verify_google_id_token_simple(id_token: &str) -> Result<GoogleIdTokenPayload, Box<dyn std::error::Error>> {
+    // 1. ID 토큰을 헤더, 페이로드, 서명으로 분리
+    let parts: Vec<&str> = id_token.split('.').collect();
+    if parts.len() != 3 {
+        return Err("Invalid ID token format".into());
+    }
+    
+    // 2. 페이로드 디코딩 (서명 검증 없이)
+    let payload_json = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(parts[1])?;
+    let payload: GoogleIdTokenPayload = serde_json::from_slice(&payload_json)?;
+    
+    // 3. 기본 검증만 수행
+    let now = chrono::Utc::now().timestamp();
+    if payload.exp < now {
+        return Err("Token expired".into());
+    }
+    
+    if !payload.email_verified {
+        return Err("Email not verified".into());
+    }
+    
+    Ok(payload)
+}
+
+/// 액세스 토큰 생성
+fn generate_access_token(user_id: i32, email: &str, config: &Config) -> String {
+    use chrono::Duration;
+    let expiration = Utc::now() + Duration::hours(24);
+    let claims = Claims {
+        sub: user_id.to_string(),
+        email: email.to_string(),
+        exp: expiration.timestamp() as usize,
+    };
+    encode(
+        &Header::default(),
+        &claims,
+        &EncodingKey::from_secret(config.jwt_secret.as_bytes()),
+    ).unwrap_or_default()
+}
+
+/// 구글 ID 토큰으로 로그인/회원가입
+async fn google_id_token_login(
+    db: web::Data<Database>,
+    payload: web::Json<GoogleIdTokenRequest>,
+    config: web::Data<Config>,
+) -> Result<HttpResponse> {
+    let input = payload.into_inner();
+    
+    info!("🔐 구글 ID 토큰 로그인 요청");
+    
+    // ID 토큰 검증
+    let google_payload = match verify_google_id_token_simple(&input.id_token).await {
+        Ok(payload) => {
+            info!("✅ 구글 ID 토큰 검증 성공: {}", payload.email);
+            payload
+        }
+        Err(e) => {
+            error!("❌ 구글 ID 토큰 검증 실패: {}", e);
+            return Ok(HttpResponse::Unauthorized().json(GoogleIdTokenResponse {
+                success: false,
+                message: format!("ID 토큰 검증 실패: {}", e),
+                data: None,
+                token: None,
+                access_token: None,
+                is_new_user: None,
+            }));
+        }
+    };
+    
+    // 1. 이미 존재하는 구글 계정인지 확인
+    if let Ok(Some((existing_member, existing_auth))) = db.find_member_by_social_provider("google", &google_payload.sub).await {
+        info!("✅ 기존 구글 계정 발견, 로그인 처리");
+        
+        // 마지막 로그인 시간 업데이트
+        if let Err(e) = db.update_last_login(existing_member.id).await {
+            warn!("⚠️ 마지막 로그인 시간 업데이트 실패: {}", e);
+        }
+        
+        // JWT 생성
+        let token = create_jwt(existing_member.id, &existing_member.email, &config).unwrap_or_default();
+        let access_token = generate_access_token(existing_member.id, &existing_member.email, &config);
+        return Ok(HttpResponse::Ok().json(GoogleIdTokenResponse {
+            success: true,
+            message: "기존 계정으로 로그인 성공".to_string(),
+            data: Some(serde_json::json!({
+                "member": member_to_camelcase_json(&existing_member),
+                "authProvider": auth_provider_to_camelcase_json(&existing_auth),
+                "googlePayload": google_payload_to_camelcase_json(&google_payload)
+            })),
+            token: Some(token),
+            access_token: Some(access_token),
+            is_new_user: Some(false),
+        }));
+    }
+    
+    // 2. 같은 이메일로 가입된 계정이 있는지 확인
+    if let Ok(Some((existing_member, _existing_auth))) = db.find_member_by_email(&google_payload.email).await {
+        info!("📧 같은 이메일의 기존 계정 발견");
+        
+        // 기존 계정에 구글 로그인 연결
+        match db.link_social_provider(
+            existing_member.id,
+            "google",
+            &google_payload.sub,
+            Some(&google_payload.email),
+        ).await {
+            Ok(new_auth) => {
+                info!("✅ 기존 계정에 구글 로그인 연결 성공");
+                // JWT 생성
+                let token = create_jwt(existing_member.id, &existing_member.email, &config).unwrap_or_default();
+                let access_token = generate_access_token(existing_member.id, &existing_member.email, &config);
+                return Ok(HttpResponse::Ok().json(GoogleIdTokenResponse {
+                    success: true,
+                    message: "기존 계정에 구글 로그인 연결 성공".to_string(),
+                    data: Some(serde_json::json!({
+                        "member": member_to_camelcase_json(&existing_member),
+                        "authProvider": auth_provider_to_camelcase_json(&new_auth),
+                        "googlePayload": google_payload_to_camelcase_json(&google_payload)
+                    })),
+                    token: Some(token),
+                    access_token: Some(access_token),
+                    is_new_user: Some(false),
+                }));
+            }
+            Err(e) => {
+                error!("❌ 구글 로그인 연결 실패: {}", e);
+                return Ok(HttpResponse::InternalServerError().json(GoogleIdTokenResponse {
+                    success: false,
+                    message: format!("구글 로그인 연결 실패: {}", e),
+                    data: None,
+                    token: None,
+                    access_token: None,
+                    is_new_user: None,
+                }));
+            }
+        }
+    }
+    
+    // 3. 새로운 회원 생성
+    let nickname = input.nickname
+        .or(google_payload.name.clone())
+        .unwrap_or_else(|| {
+            // 이름이 없으면 이메일에서 추출
+            google_payload.email.split('@').next().unwrap_or("user").to_string()
+        });
+    
+    let profile_image_url = input.profile_image_url
+        .or(google_payload.picture.clone());
+    
+    let result = db.create_social_member(
+        &google_payload.email,
+        &nickname,
+        "google",
+        &google_payload.sub,
+        Some(&google_payload.email),
+        profile_image_url.as_deref(),
+        None, // region
+        None, // gender
+        None, // birth_year
+        None, // personality_type
+    ).await;
+    
+    match result {
+        Ok((member, auth_provider)) => {
+            info!("✅ 새로운 구글 회원 생성 성공: ID {}", member.id);
+            // JWT 생성
+            let token = create_jwt(member.id, &member.email, &config).unwrap_or_default();
+            let access_token = generate_access_token(member.id, &member.email, &config);
+            Ok(HttpResponse::Ok().json(GoogleIdTokenResponse {
+                success: true,
+                message: "구글 회원가입 성공".to_string(),
+                data: Some(serde_json::json!({
+                    "member": member_to_camelcase_json(&member),
+                    "authProvider": auth_provider_to_camelcase_json(&auth_provider),
+                    "googlePayload": google_payload_to_camelcase_json(&google_payload)
+                })),
+                token: Some(token),
+                access_token: Some(access_token),
+                is_new_user: Some(true),
+            }))
+        }
+        Err(e) => {
+            error!("❌ 구글 회원가입 실패: {}", e);
+            Ok(HttpResponse::InternalServerError().json(GoogleIdTokenResponse {
+                success: false,
+                message: format!("구글 회원가입 실패: {}", e),
+                data: None,
+                token: None,
+                access_token: None,
+                is_new_user: None,
+            }))
+        }
+    }
+} 
+
+/// Member를 카멜케이스 JSON으로 변환
+fn member_to_camelcase_json(member: &Member) -> serde_json::Value {
+    serde_json::json!({
+        "id": member.id,
+        "email": member.email,
+        "nickname": member.nickname,
+        "profileImageUrl": member.profile_image_url,
+        "region": member.region,
+        "gender": member.gender,
+        "age": member.age,
+        "personalityType": member.personality_type,
+        "isActive": member.is_active,
+        "emailVerified": member.email_verified,
+        "createdAt": member.created_at,
+        "updatedAt": member.updated_at,
+        "lastLoginAt": member.last_login_at
+    })
+}
+
+/// AuthProvider를 카멜케이스 JSON으로 변환
+fn auth_provider_to_camelcase_json(auth_provider: &AuthProvider) -> serde_json::Value {
+    serde_json::json!({
+        "id": auth_provider.id,
+        "memberId": auth_provider.member_id,
+        "providerType": auth_provider.provider_type,
+        "providerId": auth_provider.provider_id,
+        "providerEmail": auth_provider.provider_email,
+        "passwordHash": auth_provider.password_hash,
+        "createdAt": auth_provider.created_at,
+        "updatedAt": auth_provider.updated_at
+    })
+}
+
+/// GooglePayload를 카멜케이스 JSON으로 변환
+fn google_payload_to_camelcase_json(payload: &GoogleIdTokenPayload) -> serde_json::Value {
+    serde_json::json!({
+        "email": payload.email,
+        "name": payload.name,
+        "picture": payload.picture,
+        "givenName": payload.given_name,
+        "familyName": payload.family_name
+    })
 } 

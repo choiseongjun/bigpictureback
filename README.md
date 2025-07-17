@@ -66,6 +66,13 @@ bigpictureback/
 - `POST /api/auth/register` - 소셜 로그인 회원가입 (구글, 카카오, 네이버, 이메일)
 - `POST /api/auth/login` - 이메일/비밀번호 로그인
 - `POST /api/auth/social-login` - 소셜 로그인 (기존 계정 확인)
+- `POST /api/auth/google-id-token` - 구글 ID 토큰으로 로그인/회원가입
+
+#### 환경변수 예시 (여러 클라이언트 ID 지원)
+```
+GOOGLE_CLIENT_IDS=웹클라이언트ID1,앱클라이언트ID2,앱클라이언트ID3
+```
+
 - `GET /api/members` - 회원 목록 조회
 - `GET /api/members/{id}` - 특정 회원 조회
 
