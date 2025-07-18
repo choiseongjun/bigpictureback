@@ -180,7 +180,7 @@ pub struct Claims {
     pub exp: usize, // 만료시간 (timestamp)
 }
 
-fn create_jwt(user_id: i32, email: &str, config: &Config) -> Result<String, jsonwebtoken::errors::Error> {
+fn create_jwt(user_id: i64, email: &str, config: &Config) -> Result<String, jsonwebtoken::errors::Error> {
     use chrono::Duration;
     let expiration = Utc::now() + Duration::hours(24);
     let claims = Claims {
@@ -1142,7 +1142,7 @@ async fn get_member_by_id(
     path: web::Path<i32>,
 ) -> Result<HttpResponse> {
     let id = path.into_inner();
-    match db.get_member_by_id(id).await {
+    match db.get_member_by_id(id.into()).await {
         Ok(Some(member)) => Ok(HttpResponse::Ok().json(serde_json::json!({
             "success": true,
             "data": member
@@ -1467,7 +1467,7 @@ async fn get_me(
             })));
         }
     };
-    let user_id: i32 = match claims.sub.parse() {
+    let user_id: i64 = match claims.sub.parse() {
         Ok(id) => id,
         Err(_) => {
             return Ok(HttpResponse::Unauthorized().json(serde_json::json!({
@@ -1518,7 +1518,7 @@ async fn verify_google_id_token_simple(id_token: &str) -> Result<GoogleIdTokenPa
 }
 
 /// 액세스 토큰 생성
-fn generate_access_token(user_id: i32, email: &str, config: &Config) -> String {
+fn generate_access_token(user_id: i64, email: &str, config: &Config) -> String {
     use chrono::Duration;
     let expiration = Utc::now() + Duration::hours(24);
     let claims = Claims {

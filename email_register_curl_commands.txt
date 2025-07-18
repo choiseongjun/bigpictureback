@@ -1,0 +1,104 @@
+# 일반 이메일 회원가입 curl 명령어
+
+## 1. 기본 이메일 회원가입 (필수 정보만)
+curl -X POST http://localhost:8080/api/auth/register \
+  -H "Content-Type: application/json" \
+  -d '{
+    "email": "user@example.com",
+    "nickname": "테스트유저",
+    "provider_type": "email",
+    "provider_id": "user@example.com",
+    "password": "password123"
+  }'
+
+## 2. 상세 정보 포함 이메일 회원가입
+curl -X POST http://localhost:8080/api/auth/register \
+  -H "Content-Type: application/json" \
+  -d '{
+    "email": "user@example.com",
+    "nickname": "테스트유저",
+    "provider_type": "email",
+    "provider_id": "user@example.com",
+    "password": "password123",
+    "profile_image_url": "https://example.com/profile.jpg",
+    "region": "서울",
+    "gender": "남성",
+    "birth_year": 1990,
+    "personality_type": "ENFP",
+    "interests": ["여행", "음악", "독서"],
+    "hobbies": ["등산", "요리"]
+  }'
+
+## 3. 최소 정보로 이메일 회원가입
+curl -X POST http://localhost:8080/api/auth/register \
+  -H "Content-Type: application/json" \
+  -d '{
+    "email": "minimal@example.com",
+    "nickname": "미니멀",
+    "provider_type": "email",
+    "provider_id": "minimal@example.com",
+    "password": "123456"
+  }'
+
+## 4. 다른 이메일로 회원가입
+curl -X POST http://localhost:8080/api/auth/register \
+  -H "Content-Type: application/json" \
+  -d '{
+    "email": "another@example.com",
+    "nickname": "다른유저",
+    "provider_type": "email",
+    "provider_id": "another@example.com",
+    "password": "securepass456",
+    "region": "부산",
+    "gender": "여성",
+    "birth_year": 1995
+  }'
+
+## 5. 이메일 로그인 (회원가입 후)
+curl -X POST http://localhost:8080/api/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{
+    "email": "user@example.com",
+    "password": "password123"
+  }'
+
+## 응답 예시:
+# 성공 시:
+# {
+#   "data": {
+#     "member": {
+#       "id": 1,
+#       "email": "user@example.com",
+#       "nickname": "테스트유저",
+#       "profileImageUrl": null,
+#       "region": "서울",
+#       "gender": "남성",
+#       "age": 33,
+#       "personalityType": "ENFP",
+#       "isActive": true,
+#       "emailVerified": false,
+#       "createdAt": "2024-01-01T00:00:00Z",
+#       "updatedAt": "2024-01-01T00:00:00Z",
+#       "lastLoginAt": null
+#     },
+#     "authProvider": {
+#       "id": 1,
+#       "memberId": 1,
+#       "providerType": "email",
+#       "providerId": "user@example.com",
+#       "providerEmail": null,
+#       "passwordHash": "password123",
+#       "createdAt": "2024-01-01T00:00:00Z",
+#       "updatedAt": "2024-01-01T00:00:00Z"
+#     },
+#     "isNewUser": true
+#   },
+#   "code": 0,
+#   "message": "회원가입 성공"
+# }
+
+## 주의사항:
+# - provider_type은 반드시 "email"로 설정
+# - provider_id는 보통 이메일 주소와 동일하게 설정
+# - password는 현재 코드에서 해싱 없이 저장되므로 실제 운영에서는 보안 강화 필요
+# - 같은 이메일로 이미 가입된 경우 기존 계정에 연결되거나 로그인 처리됨 

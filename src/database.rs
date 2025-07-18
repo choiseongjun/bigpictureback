@@ -795,7 +795,7 @@ impl Database {
     }
 
     /// 회원 조회 by id
-    pub async fn get_member_by_id(&self, id: i32) -> Result<Option<Member>> {
+    pub async fn get_member_by_id(&self, id: i64) -> Result<Option<Member>> {
         let rec = sqlx::query_as::<_, Member>(
             r#"
             SELECT * FROM bigpicture.members WHERE id = $1
@@ -1024,7 +1024,7 @@ impl Database {
     }
 
     /// 회원의 마지막 로그인 시간 업데이트
-    pub async fn update_last_login(&self, member_id: i32) -> Result<()> {
+    pub async fn update_last_login(&self, member_id: i64) -> Result<()> {
         sqlx::query(
             r#"
             UPDATE bigpicture.members 
@@ -1042,7 +1042,7 @@ impl Database {
     /// 회원에게 추가 소셜 로그인 연결
     pub async fn link_social_provider(
         &self,
-        member_id: i32,
+        member_id: i64,
         provider_type: &str,
         provider_id: &str,
         provider_email: Option<&str>,
@@ -1066,7 +1066,7 @@ impl Database {
     }
 
     // 관심사 연결
-    pub async fn add_member_interests(&self, member_id: i32, interests: &[String]) -> Result<()> {
+    pub async fn add_member_interests(&self, member_id: i64, interests: &[String]) -> Result<()> {
         for interest_name in interests {
             // 관심사 id 찾기 또는 생성
             let interest = sqlx::query_as::<_, Interest>(
@@ -1096,7 +1096,7 @@ impl Database {
         Ok(())
     }
     // 취미 연결
-    pub async fn add_member_hobbies(&self, member_id: i32, hobbies: &[String]) -> Result<()> {
+    pub async fn add_member_hobbies(&self, member_id: i64, hobbies: &[String]) -> Result<()> {
         for hobby_name in hobbies {
             // 취미 id 찾기 또는 생성
             let hobby = sqlx::query_as::<_, Hobby>(
@@ -1496,7 +1496,7 @@ pub struct MemberMarker {
 
 #[derive(sqlx::FromRow, serde::Serialize, serde::Deserialize, Debug)]
 pub struct Member {
-    pub id: i32,
+    pub id: i64,
     pub email: String,
     pub nickname: String,
     pub profile_image_url: Option<String>,
@@ -1513,8 +1513,8 @@ pub struct Member {
 
 #[derive(sqlx::FromRow, serde::Serialize, serde::Deserialize, Debug)]
 pub struct AuthProvider {
-    pub id: i32,
-    pub member_id: i32,
+    pub id: i64,
+    pub member_id: i64,
     pub provider_type: String,
     pub provider_id: String,
     pub provider_email: Option<String>,
