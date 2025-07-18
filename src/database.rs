@@ -27,6 +27,13 @@ impl Database {
     async fn init_database(pool: &PgPool) -> Result<()> {
         println!("🔧 데이터베이스 초기화 시작...");
         
+        // PostGIS 확장 활성화
+        println!("🗺️ PostGIS 확장 활성화 중...");
+        sqlx::query("CREATE EXTENSION IF NOT EXISTS postgis")
+            .execute(pool)
+            .await?;
+        println!("✅ PostGIS 확장 활성화 완료");
+        
         // bigpicture 스키마 생성
         println!("📁 bigpicture 스키마 생성 중...");
         sqlx::query("CREATE SCHEMA IF NOT EXISTS bigpicture")
@@ -110,29 +117,45 @@ impl Database {
             .execute(pool)
             .await?;
         
+        // members 테이블 생성 (먼저 생성)
+        println!("📋 members 테이블 생성 중...");
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS bigpicture.members (
+                id BIGSERIAL PRIMARY KEY,
+                email VARCHAR(255) NOT NULL UNIQUE,
+                nickname VARCHAR(100) NOT NULL,
+                profile_image_url VARCHAR(500),
+                region VARCHAR(100),
+                gender VARCHAR(20),
+                age INTEGER,
+                personality_type VARCHAR(50),
+                is_active BOOLEAN DEFAULT true,
+                email_verified BOOLEAN DEFAULT false,
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                last_login_at TIMESTAMP WITH TIME ZONE
+            )
+            "#
+        )
+        .execute(pool)
+        .await?;
+        println!("✅ members 테이블 생성 완료");
+        
         // markers 테이블 생성
         println!("📋 markers 테이블 생성 중...");
         sqlx::query(
             r#"
             CREATE TABLE IF NOT EXISTS bigpicture.markers (
-                id BIGSERIAL PRIMARY KEY,
-                latitude DOUBLE PRECISION NOT NULL,
-                longitude DOUBLE PRECISION NOT NULL,
-                emotion_tag VARCHAR(10) NOT NULL,
-                description TEXT NOT NULL,
-                likes INTEGER DEFAULT 0,
-                dislikes INTEGER DEFAULT 0,
-                views INTEGER DEFAULT 0,
-                author VARCHAR(50) DEFAULT '익명',
-                thumbnail_img VARCHAR(500),
-                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-                updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
-                
-                CONSTRAINT check_latitude CHECK (latitude BETWEEN -90 AND 90),
-                CONSTRAINT check_longitude CHECK (longitude BETWEEN -180 AND 180),
-                CONSTRAINT check_likes CHECK (likes >= 0),
-                CONSTRAINT check_dislikes CHECK (dislikes >= 0),
-                CONSTRAINT check_views CHECK (views >= 0)
+                id SERIAL PRIMARY KEY,
+                location GEOGRAPHY(POINT, 4326),
+                emotion_tag TEXT,
+                description TEXT,
+                likes INTEGER,
+                dislikes INTEGER,
+                views INTEGER,
+                author TEXT,
+                thumbnail_img TEXT
             )
             "#
         )
@@ -140,31 +163,94 @@ impl Database {
         .await?;
         println!("✅ markers 테이블 생성 완료");
         
-        // markers 인덱스 - 성능 최적화
-        sqlx::query("CREATE INDEX IF NOT EXISTS idx_markers_location ON bigpicture.markers(latitude, longitude)")
-            .execute(pool)
-            .await?;
-        sqlx::query("CREATE INDEX IF NOT EXISTS idx_markers_emotion_tag ON bigpicture.markers(emotion_tag)")
-            .execute(pool)
-            .await?;
-        sqlx::query("CREATE INDEX IF NOT EXISTS idx_markers_likes ON bigpicture.markers(likes)")
-            .execute(pool)
-            .await?;
-        sqlx::query("CREATE INDEX IF NOT EXISTS idx_markers_views ON bigpicture.markers(views)")
-            .execute(pool)
-            .await?;
-        sqlx::query("CREATE INDEX IF NOT EXISTS idx_markers_created_at ON bigpicture.markers(created_at)")
+        // 공간 인덱스 생성 (성능 최적화)
+        sqlx::query("CREATE INDEX IF NOT EXISTS markers_location_gist ON bigpicture.markers USING GIST (location)")
             .execute(pool)
             .await?;
         
-        // 복합 인덱스 추가 - 자주 사용되는 조합
-        sqlx::query("CREATE INDEX IF NOT EXISTS idx_markers_location_emotion ON bigpicture.markers(latitude, longitude, emotion_tag)")
+        // auth_providers 테이블 생성
+        println!("📋 auth_providers 테이블 생성 중...");
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS bigpicture.auth_providers (
+                id BIGSERIAL PRIMARY KEY,
+                member_id BIGINT NOT NULL REFERENCES bigpicture.members(id) ON DELETE CASCADE,
+                provider_type VARCHAR(50) NOT NULL, -- google, kakao, naver, meta, email
+                provider_id VARCHAR(255) NOT NULL,
+                provider_email VARCHAR(255),
+                password_hash VARCHAR(255),
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                
+                UNIQUE(provider_type, provider_id),
+                UNIQUE(member_id, provider_type)
+            )
+            "#
+        )
+        .execute(pool)
+        .await?;
+        println!("✅ auth_providers 테이블 생성 완료");
+        
+        // member_markers 테이블 생성 (마커와 유저 연결)
+        println!("📋 member_markers 테이블 생성 중...");
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS bigpicture.member_markers (
+                id BIGSERIAL PRIMARY KEY,
+                member_id BIGINT NOT NULL REFERENCES bigpicture.members(id) ON DELETE CASCADE,
+                marker_id BIGINT NOT NULL REFERENCES bigpicture.markers(id) ON DELETE CASCADE,
+                interaction_type VARCHAR(50) NOT NULL, -- created, liked, disliked, viewed, bookmarked
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                
+                UNIQUE(member_id, marker_id, interaction_type)
+            )
+            "#
+        )
+        .execute(pool)
+        .await?;
+        println!("✅ member_markers 테이블 생성 완료");
+        
+
+        
+        // 인덱스 생성
+        println!("🔍 추가 인덱스 생성 중...");
+        
+        // members 인덱스
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_members_email ON bigpicture.members(email)")
             .execute(pool)
             .await?;
-        sqlx::query("CREATE INDEX IF NOT EXISTS idx_markers_location_likes ON bigpicture.markers(latitude, longitude, likes)")
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_members_nickname ON bigpicture.members(nickname)")
             .execute(pool)
             .await?;
-        sqlx::query("CREATE INDEX IF NOT EXISTS idx_markers_location_views ON bigpicture.markers(latitude, longitude, views)")
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_members_created_at ON bigpicture.members(created_at)")
+            .execute(pool)
+            .await?;
+        
+        // auth_providers 인덱스
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_auth_providers_member_id ON bigpicture.auth_providers(member_id)")
+            .execute(pool)
+            .await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_auth_providers_provider_type_id ON bigpicture.auth_providers(provider_type, provider_id)")
+            .execute(pool)
+            .await?;
+        
+        // member_markers 인덱스
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_member_markers_member_id ON bigpicture.member_markers(member_id)")
+            .execute(pool)
+            .await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_member_markers_marker_id ON bigpicture.member_markers(marker_id)")
+            .execute(pool)
+            .await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_member_markers_interaction_type ON bigpicture.member_markers(interaction_type)")
+            .execute(pool)
+            .await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_member_markers_member_marker ON bigpicture.member_markers(member_id, marker_id)")
+            .execute(pool)
+            .await?;
+        
+        // markers member_id 인덱스
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_markers_member_id ON bigpicture.markers(member_id)")
             .execute(pool)
             .await?;
         
@@ -190,7 +276,25 @@ impl Database {
         .fetch_one(pool)
         .await?;
         
-        if original_exists && webp_exists && markers_exists {
+        let members_exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_schema = 'bigpicture' AND table_name = 'members')"
+        )
+        .fetch_one(pool)
+        .await?;
+        
+        let auth_providers_exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_schema = 'bigpicture' AND table_name = 'auth_providers')"
+        )
+        .fetch_one(pool)
+        .await?;
+        
+        let member_markers_exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_schema = 'bigpicture' AND table_name = 'member_markers')"
+        )
+        .fetch_one(pool)
+        .await?;
+        
+        if original_exists && webp_exists && markers_exists && members_exists && auth_providers_exists && member_markers_exists {
             println!("✅ 새로운 테이블 구조가 성공적으로 생성되었습니다!");
             
             // 테이블 구조 확인
@@ -614,11 +718,10 @@ impl Database {
         info!("   - 정렬: {} {}", sort_column, sort_direction);
         
         let mut query = format!(
-            "SELECT id, latitude, longitude, emotion_tag, description, likes, dislikes, views, author, thumbnail_img, created_at, updated_at 
+            "SELECT id, ST_AsText(location) as location, emotion_tag, description, likes, dislikes, views, author, thumbnail_img 
              FROM bigpicture.markers 
-             WHERE latitude BETWEEN {} AND {} 
-             AND longitude BETWEEN {} AND {}",
-            lat_min, lat_max, lng_min, lng_max
+             WHERE ST_Within(location, ST_MakeEnvelope({}, {}, {}, {}, 4326))",
+            lng_min, lat_min, lng_max, lat_max
         );
         
         // 감성 태그 필터
@@ -1022,6 +1125,299 @@ impl Database {
         }
         Ok(())
     }
+
+    /// 마커 생성
+    pub async fn create_marker(
+        &self,
+        latitude: f64,
+        longitude: f64,
+        emotion_tag: &str,
+        description: &str,
+        author: &str,
+        thumbnail_img: Option<&str>,
+    ) -> Result<Marker> {
+        let marker = sqlx::query_as::<_, Marker>(
+            r#"
+            INSERT INTO bigpicture.markers
+                (location, emotion_tag, description, author, thumbnail_img)
+            VALUES (ST_SetSRID(ST_MakePoint($1, $2), 4326), $3, $4, $5, $6)
+            RETURNING id, ST_AsText(location) as location, emotion_tag, description, likes, dislikes, views, author, thumbnail_img
+            "#
+        )
+        .bind(longitude) // PostGIS는 (longitude, latitude) 순서
+        .bind(latitude)
+        .bind(emotion_tag)
+        .bind(description)
+        .bind(author)
+        .bind(thumbnail_img)
+        .fetch_one(&self.pool)
+        .await?;
+
+        Ok(marker)
+    }
+
+    /// 마커 좋아요/싫어요 처리
+    pub async fn toggle_marker_reaction(
+        &self,
+        member_id: i64,
+        marker_id: i64,
+        reaction_type: &str, // "like" 또는 "dislike"
+    ) -> Result<(i32, i32)> { // (좋아요 수, 싫어요 수) 반환
+        let mut tx = self.pool.begin().await?;
+        
+        // 기존 반응 확인
+        let existing = sqlx::query_as::<_, MemberMarker>(
+            r#"
+            SELECT * FROM bigpicture.member_markers 
+            WHERE member_id = $1 AND marker_id = $2 AND interaction_type IN ('liked', 'disliked')
+            "#
+        )
+        .bind(member_id)
+        .bind(marker_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        if let Some(existing_reaction) = existing {
+            if existing_reaction.interaction_type == reaction_type {
+                // 같은 반응이면 제거
+                sqlx::query(
+                    "DELETE FROM bigpicture.member_markers WHERE id = $1"
+                )
+                .bind(existing_reaction.id)
+                .execute(&mut *tx)
+                .await?;
+
+                // 마커 카운트 감소
+                let update_query = match reaction_type {
+                    "liked" => "UPDATE bigpicture.markers SET likes = GREATEST(likes - 1, 0) WHERE id = $1",
+                    "disliked" => "UPDATE bigpicture.markers SET dislikes = GREATEST(dislikes - 1, 0) WHERE id = $1",
+                    _ => return Err(anyhow::anyhow!("Invalid reaction type")),
+                };
+                sqlx::query(update_query)
+                    .bind(marker_id)
+                    .execute(&mut *tx)
+                    .await?;
+            } else {
+                // 다른 반응이면 변경
+                sqlx::query(
+                    "UPDATE bigpicture.member_markers SET interaction_type = $1, updated_at = NOW() WHERE id = $2"
+                )
+                .bind(reaction_type)
+                .bind(existing_reaction.id)
+                .execute(&mut *tx)
+                .await?;
+
+                // 마커 카운트 업데이트
+                if reaction_type == "liked" {
+                    sqlx::query(
+                        "UPDATE bigpicture.markers SET likes = likes + 1, dislikes = GREATEST(dislikes - 1, 0) WHERE id = $1"
+                    )
+                    .bind(marker_id)
+                    .execute(&mut *tx)
+                    .await?;
+                } else {
+                    sqlx::query(
+                        "UPDATE bigpicture.markers SET dislikes = dislikes + 1, likes = GREATEST(likes - 1, 0) WHERE id = $1"
+                    )
+                    .bind(marker_id)
+                    .execute(&mut *tx)
+                    .await?;
+                }
+            }
+        } else {
+            // 새로운 반응 추가
+            sqlx::query(
+                r#"
+                INSERT INTO bigpicture.member_markers
+                    (member_id, marker_id, interaction_type)
+                VALUES ($1, $2, $3)
+                "#
+            )
+            .bind(member_id)
+            .bind(marker_id)
+            .bind(reaction_type)
+            .execute(&mut *tx)
+            .await?;
+
+            // 마커 카운트 증가
+            let update_query = match reaction_type {
+                "liked" => "UPDATE bigpicture.markers SET likes = likes + 1 WHERE id = $1",
+                "disliked" => "UPDATE bigpicture.markers SET dislikes = dislikes + 1 WHERE id = $1",
+                _ => return Err(anyhow::anyhow!("Invalid reaction type")),
+            };
+            sqlx::query(update_query)
+                .bind(marker_id)
+                .execute(&mut *tx)
+                .await?;
+        }
+
+        // 업데이트된 카운트 조회
+        let counts = sqlx::query_as::<_, (i32, i32)>(
+            "SELECT likes, dislikes FROM bigpicture.markers WHERE id = $1"
+        )
+        .bind(marker_id)
+        .fetch_one(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+        Ok(counts)
+    }
+
+    /// 마커 조회 기록 추가
+    pub async fn add_marker_view(&self, member_id: i64, marker_id: i64) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        
+        // 기존 조회 기록 확인
+        let existing = sqlx::query_as::<_, MemberMarker>(
+            r#"
+            SELECT * FROM bigpicture.member_markers 
+            WHERE member_id = $1 AND marker_id = $2 AND interaction_type = 'viewed'
+            "#
+        )
+        .bind(member_id)
+        .bind(marker_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        if existing.is_none() {
+            // 새로운 조회 기록 추가
+            sqlx::query(
+                r#"
+                INSERT INTO bigpicture.member_markers
+                    (member_id, marker_id, interaction_type)
+                VALUES ($1, $2, 'viewed')
+                "#
+            )
+            .bind(member_id)
+            .bind(marker_id)
+            .execute(&mut *tx)
+            .await?;
+
+            // 마커 조회수 증가
+            sqlx::query(
+                "UPDATE bigpicture.markers SET views = views + 1 WHERE id = $1"
+            )
+            .bind(marker_id)
+            .execute(&mut *tx)
+            .await?;
+        }
+
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// 마커 북마크 토글
+    pub async fn toggle_marker_bookmark(&self, member_id: i64, marker_id: i64) -> Result<bool> {
+        let mut tx = self.pool.begin().await?;
+        
+        // 기존 북마크 확인
+        let existing = sqlx::query_as::<_, MemberMarker>(
+            r#"
+            SELECT * FROM bigpicture.member_markers 
+            WHERE member_id = $1 AND marker_id = $2 AND interaction_type = 'bookmarked'
+            "#
+        )
+        .bind(member_id)
+        .bind(marker_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        let is_bookmarked = if let Some(existing_bookmark) = existing {
+            // 북마크 제거
+            sqlx::query(
+                "DELETE FROM bigpicture.member_markers WHERE id = $1"
+            )
+            .bind(existing_bookmark.id)
+            .execute(&mut *tx)
+            .await?;
+            false
+        } else {
+            // 북마크 추가
+            sqlx::query(
+                r#"
+                INSERT INTO bigpicture.member_markers
+                    (member_id, marker_id, interaction_type)
+                VALUES ($1, $2, 'bookmarked')
+                "#
+            )
+            .bind(member_id)
+            .bind(marker_id)
+            .execute(&mut *tx)
+            .await?;
+            true
+        };
+
+        tx.commit().await?;
+        Ok(is_bookmarked)
+    }
+
+    /// 유저가 생성한 마커 목록 조회
+    pub async fn get_member_created_markers(&self, member_id: i64, limit: Option<i32>) -> Result<Vec<Marker>> {
+        let markers = sqlx::query_as::<_, Marker>(
+            r#"
+            SELECT id, ST_AsText(location) as location, emotion_tag, description, likes, dislikes, views, author, thumbnail_img, member_id, created_at, updated_at 
+            FROM bigpicture.markers 
+            WHERE member_id = $1 
+            ORDER BY created_at DESC 
+            LIMIT $2
+            "#
+        )
+        .bind(member_id)
+        .bind(limit.unwrap_or(50))
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(markers)
+    }
+
+    /// 유저가 좋아요한 마커 목록 조회
+    pub async fn get_member_liked_markers(&self, member_id: i64, limit: Option<i32>) -> Result<Vec<Marker>> {
+        let markers = sqlx::query_as::<_, Marker>(
+            r#"
+            SELECT m.id, ST_AsText(m.location) as location, m.emotion_tag, m.description, m.likes, m.dislikes, m.views, m.author, m.thumbnail_img, m.member_id, m.created_at, m.updated_at 
+            FROM bigpicture.markers m
+            INNER JOIN bigpicture.member_markers mm ON m.id = mm.marker_id
+            WHERE mm.member_id = $1 AND mm.interaction_type = 'liked'
+            ORDER BY mm.created_at DESC 
+            LIMIT $2
+            "#
+        )
+        .bind(member_id)
+        .bind(limit.unwrap_or(50))
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(markers)
+    }
+
+    /// 유저가 북마크한 마커 목록 조회
+    pub async fn get_member_bookmarked_markers(&self, member_id: i64, limit: Option<i32>) -> Result<Vec<Marker>> {
+        let markers = sqlx::query_as::<_, Marker>(
+            r#"
+            SELECT m.id, ST_AsText(m.location) as location, m.emotion_tag, m.description, m.likes, m.dislikes, m.views, m.author, m.thumbnail_img, m.member_id, m.created_at, m.updated_at 
+            FROM bigpicture.markers m
+            INNER JOIN bigpicture.member_markers mm ON m.id = mm.marker_id
+            WHERE mm.member_id = $1 AND mm.interaction_type = 'bookmarked'
+            ORDER BY mm.created_at DESC 
+            LIMIT $2
+            "#
+        )
+        .bind(member_id)
+        .bind(limit.unwrap_or(50))
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(markers)
+    }
+
+    /// 마커의 상세 정보 조회
+    pub async fn get_marker_detail(&self, marker_id: i64) -> Result<Option<Marker>> {
+        let marker = sqlx::query_as::<_, Marker>(
+            "SELECT id, ST_AsText(location) as location, emotion_tag, description, likes, dislikes, views, author, thumbnail_img FROM bigpicture.markers WHERE id = $1"
+        )
+        .bind(marker_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(marker)
+    }
 }
 
 #[derive(sqlx::FromRow, serde::Serialize, serde::Deserialize)]
@@ -1077,16 +1473,23 @@ pub struct ImageInfo {
 
 #[derive(sqlx::FromRow, Debug, serde::Serialize)]
 pub struct Marker {
-    pub id: i64,
-    pub latitude: f64,
-    pub longitude: f64,
-    pub emotion_tag: String,
-    pub description: String,
+    pub id: i32,
+    pub location: Option<String>, // PostGIS geography 타입 (WKT 형식)
+    pub emotion_tag: Option<String>,
+    pub description: Option<String>,
     pub likes: i32,
     pub dislikes: i32,
     pub views: i32,
-    pub author: String,
+    pub author: Option<String>,
     pub thumbnail_img: Option<String>,
+}
+
+#[derive(sqlx::FromRow, serde::Serialize, serde::Deserialize, Debug)]
+pub struct MemberMarker {
+    pub id: i64,
+    pub member_id: i64,
+    pub marker_id: i64,
+    pub interaction_type: String, // created, liked, disliked, viewed, bookmarked
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
 } 

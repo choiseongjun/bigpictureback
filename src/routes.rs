@@ -122,6 +122,39 @@ pub struct GoogleIdTokenRequest {
     pub profile_image_url: Option<String>,
 }
 
+#[derive(Deserialize)]
+pub struct CreateMarkerRequest {
+    pub latitude: f64,
+    pub longitude: f64,
+    pub emotion_tag: String,
+    pub description: String,
+    pub thumbnail_img: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct MarkerResponse {
+    pub success: bool,
+    pub message: String,
+    pub data: Option<serde_json::Value>,
+}
+
+#[derive(Serialize)]
+pub struct MarkerReactionResponse {
+    pub success: bool,
+    pub message: String,
+    pub likes: i32,
+    pub dislikes: i32,
+    pub is_liked: Option<bool>,
+    pub is_disliked: Option<bool>,
+}
+
+#[derive(Serialize)]
+pub struct MarkerBookmarkResponse {
+    pub success: bool,
+    pub message: String,
+    pub is_bookmarked: bool,
+}
+
 #[derive(Serialize)]
 pub struct GoogleIdTokenResponse {
     pub success: bool,
@@ -168,6 +201,15 @@ pub fn setup_routes(config: &mut web::ServiceConfig) {
             web::scope("/api")
                 .route("/health", web::get().to(health_check))
                 .route("/markers", web::get().to(get_markers))
+                .route("/markers", web::post().to(create_marker))
+                .route("/markers/{id}", web::get().to(get_marker_detail))
+                .route("/markers/{id}/like", web::post().to(toggle_marker_like))
+                .route("/markers/{id}/dislike", web::post().to(toggle_marker_dislike))
+                .route("/markers/{id}/bookmark", web::post().to(toggle_marker_bookmark))
+                .route("/markers/{id}/view", web::post().to(add_marker_view))
+                .route("/members/{id}/markers/created", web::get().to(get_member_created_markers))
+                .route("/members/{id}/markers/liked", web::get().to(get_member_liked_markers))
+                .route("/members/{id}/markers/bookmarked", web::get().to(get_member_bookmarked_markers))
                 .route("/members", web::post().to(register_member))
                 .route("/members", web::get().to(list_members))
                 .route("/members/me", web::get().to(
@@ -1688,4 +1730,375 @@ fn google_payload_to_camelcase_json(payload: &GoogleIdTokenPayload) -> serde_jso
         "givenName": payload.given_name,
         "familyName": payload.family_name
     })
+}
+
+/// JWT 토큰에서 유저 ID 추출
+fn extract_user_id_from_token(req: &actix_web::HttpRequest, config: &Config) -> Result<i64, actix_web::Error> {
+    let auth_header = req.headers().get("Authorization").and_then(|h| h.to_str().ok());
+    if auth_header.is_none() || !auth_header.unwrap().starts_with("Bearer ") {
+        return Err(actix_web::error::ErrorUnauthorized("No Bearer token"));
+    }
+    let token = &auth_header.unwrap()[7..];
+    let validation = Validation::default();
+    let claims = match decode::<Claims>(
+        token,
+        &DecodingKey::from_secret(config.jwt_secret.as_bytes()),
+        &validation,
+    ) {
+        Ok(data) => data.claims,
+        Err(e) => {
+            return Err(actix_web::error::ErrorUnauthorized(format!("Invalid token: {}", e)));
+        }
+    };
+    let user_id: i64 = match claims.sub.parse() {
+        Ok(id) => id,
+        Err(_) => {
+            return Err(actix_web::error::ErrorUnauthorized("Invalid user id in token"));
+        }
+    };
+    Ok(user_id)
+}
+
+/// Marker를 카멜케이스 JSON으로 변환
+fn marker_to_camelcase_json(marker: &crate::database::Marker) -> serde_json::Value {
+    // PostGIS WKT 형식에서 좌표 추출 (POINT(lng lat))
+    let (latitude, longitude) = if let Some(location) = &marker.location {
+        if location.starts_with("POINT(") && location.ends_with(")") {
+            let coords = &location[6..location.len()-1]; // "POINT(" 제거하고 ")" 제거
+            let parts: Vec<&str> = coords.split_whitespace().collect();
+            if parts.len() == 2 {
+                if let (Ok(lng), Ok(lat)) = (parts[0].parse::<f64>(), parts[1].parse::<f64>()) {
+                    (lat, lng) // WKT는 (longitude latitude) 순서이므로 바꿔줌
+                } else {
+                    (0.0, 0.0)
+                }
+            } else {
+                (0.0, 0.0)
+            }
+        } else {
+            (0.0, 0.0)
+        }
+    } else {
+        (0.0, 0.0)
+    };
+
+    serde_json::json!({
+        "id": marker.id,
+        "latitude": latitude,
+        "longitude": longitude,
+        "emotionTag": marker.emotion_tag,
+        "description": marker.description,
+        "likes": marker.likes,
+        "dislikes": marker.dislikes,
+        "views": marker.views,
+        "author": marker.author,
+        "thumbnailImg": marker.thumbnail_img
+    })
+}
+
+/// 마커 생성
+async fn create_marker(
+    db: web::Data<Database>,
+    payload: web::Json<CreateMarkerRequest>,
+) -> Result<HttpResponse> {
+    let input = payload.into_inner();
+    
+    info!("📍 마커 생성 요청: 위치 ({}, {})", input.latitude, input.longitude);
+    
+    match db.create_marker(
+        input.latitude,
+        input.longitude,
+        &input.emotion_tag,
+        &input.description,
+        "익명", // 기본 작성자
+        input.thumbnail_img.as_deref(),
+    ).await {
+        Ok(marker) => {
+            info!("✅ 마커 생성 성공: ID {}", marker.id);
+            Ok(HttpResponse::Ok().json(MarkerResponse {
+                success: true,
+                message: "마커 생성 성공".to_string(),
+                data: Some(marker_to_camelcase_json(&marker)),
+            }))
+        }
+        Err(e) => {
+            error!("❌ 마커 생성 실패: {}", e);
+            Ok(HttpResponse::InternalServerError().json(MarkerResponse {
+                success: false,
+                message: format!("마커 생성 실패: {}", e),
+                data: None,
+            }))
+        }
+    }
+}
+
+/// 마커 상세 정보 조회
+async fn get_marker_detail(
+    db: web::Data<Database>,
+    path: web::Path<i64>,
+) -> Result<HttpResponse> {
+    let marker_id = path.into_inner();
+    
+    info!("🔍 마커 상세 조회: 마커 {}", marker_id);
+    
+    match db.get_marker_detail(marker_id).await {
+        Ok(Some(marker)) => {
+            Ok(HttpResponse::Ok().json(MarkerResponse {
+                success: true,
+                message: "마커 상세 조회 성공".to_string(),
+                data: Some(marker_to_camelcase_json(&marker)),
+            }))
+        }
+        Ok(None) => {
+            Ok(HttpResponse::NotFound().json(MarkerResponse {
+                success: false,
+                message: "마커를 찾을 수 없습니다".to_string(),
+                data: None,
+            }))
+        }
+        Err(e) => {
+            error!("❌ 마커 상세 조회 실패: {}", e);
+            Ok(HttpResponse::InternalServerError().json(MarkerResponse {
+                success: false,
+                message: format!("마커 상세 조회 실패: {}", e),
+                data: None,
+            }))
+        }
+    }
+}
+
+/// 마커 좋아요 토글
+async fn toggle_marker_like(
+    db: web::Data<Database>,
+    path: web::Path<i64>,
+    config: web::Data<Config>,
+    req: actix_web::HttpRequest,
+) -> Result<HttpResponse> {
+    let marker_id = path.into_inner();
+    let user_id = extract_user_id_from_token(&req, &config)?;
+    
+    info!("👍 마커 좋아요 토글: 마커 {}, 유저 {}", marker_id, user_id);
+    
+    match db.toggle_marker_reaction(user_id, marker_id, "liked").await {
+        Ok((likes, dislikes)) => {
+            Ok(HttpResponse::Ok().json(MarkerReactionResponse {
+                success: true,
+                message: "좋아요 처리 완료".to_string(),
+                likes,
+                dislikes,
+                is_liked: Some(likes > 0),
+                is_disliked: Some(dislikes > 0),
+            }))
+        }
+        Err(e) => {
+            error!("❌ 마커 좋아요 처리 실패: {}", e);
+            Ok(HttpResponse::InternalServerError().json(MarkerReactionResponse {
+                success: false,
+                message: format!("좋아요 처리 실패: {}", e),
+                likes: 0,
+                dislikes: 0,
+                is_liked: None,
+                is_disliked: None,
+            }))
+        }
+    }
+}
+
+/// 마커 싫어요 토글
+async fn toggle_marker_dislike(
+    db: web::Data<Database>,
+    path: web::Path<i64>,
+    config: web::Data<Config>,
+    req: actix_web::HttpRequest,
+) -> Result<HttpResponse> {
+    let marker_id = path.into_inner();
+    let user_id = extract_user_id_from_token(&req, &config)?;
+    
+    info!("👎 마커 싫어요 토글: 마커 {}, 유저 {}", marker_id, user_id);
+    
+    match db.toggle_marker_reaction(user_id, marker_id, "disliked").await {
+        Ok((likes, dislikes)) => {
+            Ok(HttpResponse::Ok().json(MarkerReactionResponse {
+                success: true,
+                message: "싫어요 처리 완료".to_string(),
+                likes,
+                dislikes,
+                is_liked: Some(likes > 0),
+                is_disliked: Some(dislikes > 0),
+            }))
+        }
+        Err(e) => {
+            error!("❌ 마커 싫어요 처리 실패: {}", e);
+            Ok(HttpResponse::InternalServerError().json(MarkerReactionResponse {
+                success: false,
+                message: format!("싫어요 처리 실패: {}", e),
+                likes: 0,
+                dislikes: 0,
+                is_liked: None,
+                is_disliked: None,
+            }))
+        }
+    }
+}
+
+/// 마커 북마크 토글
+async fn toggle_marker_bookmark(
+    db: web::Data<Database>,
+    path: web::Path<i64>,
+    config: web::Data<Config>,
+    req: actix_web::HttpRequest,
+) -> Result<HttpResponse> {
+    let marker_id = path.into_inner();
+    let user_id = extract_user_id_from_token(&req, &config)?;
+    
+    info!("🔖 마커 북마크 토글: 마커 {}, 유저 {}", marker_id, user_id);
+    
+    match db.toggle_marker_bookmark(user_id, marker_id).await {
+        Ok(is_bookmarked) => {
+            Ok(HttpResponse::Ok().json(MarkerBookmarkResponse {
+                success: true,
+                message: if is_bookmarked { "북마크 추가 완료".to_string() } else { "북마크 제거 완료".to_string() },
+                is_bookmarked,
+            }))
+        }
+        Err(e) => {
+            error!("❌ 마커 북마크 처리 실패: {}", e);
+            Ok(HttpResponse::InternalServerError().json(MarkerBookmarkResponse {
+                success: false,
+                message: format!("북마크 처리 실패: {}", e),
+                is_bookmarked: false,
+            }))
+        }
+    }
+}
+
+/// 마커 조회 기록 추가
+async fn add_marker_view(
+    db: web::Data<Database>,
+    path: web::Path<i64>,
+    config: web::Data<Config>,
+    req: actix_web::HttpRequest,
+) -> Result<HttpResponse> {
+    let marker_id = path.into_inner();
+    let user_id = extract_user_id_from_token(&req, &config)?;
+    
+    info!("👁️ 마커 조회 기록: 마커 {}, 유저 {}", marker_id, user_id);
+    
+    match db.add_marker_view(user_id, marker_id).await {
+        Ok(_) => {
+            Ok(HttpResponse::Ok().json(serde_json::json!({
+                "success": true,
+                "message": "조회 기록 추가 완료"
+            })))
+        }
+        Err(e) => {
+            error!("❌ 마커 조회 기록 실패: {}", e);
+            Ok(HttpResponse::InternalServerError().json(serde_json::json!({
+                "success": false,
+                "message": format!("조회 기록 실패: {}", e)
+            })))
+        }
+    }
+}
+
+/// 유저가 생성한 마커 목록 조회
+async fn get_member_created_markers(
+    db: web::Data<Database>,
+    path: web::Path<i64>,
+    query: web::Query<std::collections::HashMap<String, String>>,
+) -> Result<HttpResponse> {
+    let member_id = path.into_inner();
+    let limit = query.get("limit").and_then(|l| l.parse::<i32>().ok());
+    
+    info!("📝 유저 생성 마커 조회: 유저 {}, 제한 {:?}", member_id, limit);
+    
+    match db.get_member_created_markers(member_id, limit).await {
+        Ok(markers) => {
+            let markers_json: Vec<serde_json::Value> = markers.iter()
+                .map(|marker| marker_to_camelcase_json(marker))
+                .collect();
+            
+            Ok(HttpResponse::Ok().json(serde_json::json!({
+                "success": true,
+                "message": "생성한 마커 목록 조회 성공",
+                "data": markers_json,
+                "count": markers.len()
+            })))
+        }
+        Err(e) => {
+            error!("❌ 유저 생성 마커 조회 실패: {}", e);
+            Ok(HttpResponse::InternalServerError().json(serde_json::json!({
+                "success": false,
+                "message": format!("생성한 마커 조회 실패: {}", e)
+            })))
+        }
+    }
+}
+
+/// 유저가 좋아요한 마커 목록 조회
+async fn get_member_liked_markers(
+    db: web::Data<Database>,
+    path: web::Path<i64>,
+    query: web::Query<std::collections::HashMap<String, String>>,
+) -> Result<HttpResponse> {
+    let member_id = path.into_inner();
+    let limit = query.get("limit").and_then(|l| l.parse::<i32>().ok());
+    
+    info!("👍 유저 좋아요 마커 조회: 유저 {}, 제한 {:?}", member_id, limit);
+    
+    match db.get_member_liked_markers(member_id, limit).await {
+        Ok(markers) => {
+            let markers_json: Vec<serde_json::Value> = markers.iter()
+                .map(|marker| marker_to_camelcase_json(marker))
+                .collect();
+            
+            Ok(HttpResponse::Ok().json(serde_json::json!({
+                "success": true,
+                "message": "좋아요한 마커 목록 조회 성공",
+                "data": markers_json,
+                "count": markers.len()
+            })))
+        }
+        Err(e) => {
+            error!("❌ 유저 좋아요 마커 조회 실패: {}", e);
+            Ok(HttpResponse::InternalServerError().json(serde_json::json!({
+                "success": false,
+                "message": format!("좋아요한 마커 조회 실패: {}", e)
+            })))
+        }
+    }
+}
+
+/// 유저가 북마크한 마커 목록 조회
+async fn get_member_bookmarked_markers(
+    db: web::Data<Database>,
+    path: web::Path<i64>,
+    query: web::Query<std::collections::HashMap<String, String>>,
+) -> Result<HttpResponse> {
+    let member_id = path.into_inner();
+    let limit = query.get("limit").and_then(|l| l.parse::<i32>().ok());
+    
+    info!("🔖 유저 북마크 마커 조회: 유저 {}, 제한 {:?}", member_id, limit);
+    
+    match db.get_member_bookmarked_markers(member_id, limit).await {
+        Ok(markers) => {
+            let markers_json: Vec<serde_json::Value> = markers.iter()
+                .map(|marker| marker_to_camelcase_json(marker))
+                .collect();
+            
+            Ok(HttpResponse::Ok().json(serde_json::json!({
+                "success": true,
+                "message": "북마크한 마커 목록 조회 성공",
+                "data": markers_json,
+                "count": markers.len()
+            })))
+        }
+        Err(e) => {
+            error!("❌ 유저 북마크 마커 조회 실패: {}", e);
+            Ok(HttpResponse::InternalServerError().json(serde_json::json!({
+                "success": false,
+                "message": format!("북마크한 마커 조회 실패: {}", e)
+            })))
+        }
+    }
 } 
