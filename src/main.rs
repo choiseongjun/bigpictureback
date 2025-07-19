@@ -9,6 +9,7 @@ mod database;
 mod config;
 mod s3_service;
 mod s3_routes;
+mod error_handler;
 
 use routes::setup_routes;
 use database::Database;

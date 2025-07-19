@@ -16,6 +16,7 @@ use crate::database::{Database, Member, AuthProvider};
 use crate::config::Config;
 use crate::s3_service::S3Service;
 use crate::s3_routes::{upload_image_s3, upload_circular_thumbnail_s3_internal};
+use crate::error_handler::ErrorHandler;
 
 // 구글 ID 토큰 페이로드 구조체
 #[derive(Debug, Serialize, Deserialize)]
@@ -129,6 +130,35 @@ pub struct CreateMarkerRequest {
     pub emotion_tag: String,
     pub description: String,
     pub thumbnail_img: Option<String>,
+    pub images: Option<Vec<CreateMarkerImageRequest>>,
+}
+
+#[derive(Deserialize)]
+pub struct CreateMarkerImageRequest {
+    pub image_url: String,
+    pub image_type: String, // thumbnail, detail, gallery
+    pub image_order: Option<i32>,
+    pub is_primary: Option<bool>,
+}
+
+#[derive(Deserialize)]
+pub struct AddMarkerImageRequest {
+    pub image_url: String,
+    pub image_type: String, // thumbnail, detail, gallery
+    pub image_order: Option<i32>,
+    pub is_primary: Option<bool>,
+}
+
+#[derive(Deserialize)]
+pub struct UpdateMarkerImageOrderRequest {
+    pub image_order: i32,
+}
+
+#[derive(Serialize)]
+pub struct MarkerImageResponse {
+    pub success: bool,
+    pub message: String,
+    pub data: Option<serde_json::Value>,
 }
 
 #[derive(Serialize)]
@@ -164,6 +194,8 @@ pub struct GoogleIdTokenResponse {
     pub token: Option<String>,
     #[serde(rename = "accessToken")]
     pub access_token: Option<String>,
+    #[serde(rename = "refreshToken")]
+    pub refresh_token: Option<String>,
     #[serde(rename = "isNewUser")]
     pub is_new_user: Option<bool>,
 }
@@ -201,21 +233,36 @@ pub fn setup_routes(config: &mut web::ServiceConfig) {
             web::scope("/api")
                 .route("/health", web::get().to(health_check))
                 .route("/markers", web::get().to(get_markers))
-                .route("/markers", web::post().to(create_marker))
+                .route("/markers", web::post().to(
+                    |db, payload, config, req| create_marker(db, payload, config, req)
+                ))
                 .route("/markers/{id}", web::get().to(get_marker_detail))
                 .route("/markers/{id}/like", web::post().to(toggle_marker_like))
                 .route("/markers/{id}/dislike", web::post().to(toggle_marker_dislike))
-                .route("/markers/{id}/bookmark", web::post().to(toggle_marker_bookmark))
-                .route("/markers/{id}/view", web::post().to(add_marker_view))
+                            .route("/markers/{id}/bookmark", web::post().to(toggle_marker_bookmark))
+            .route("/markers/{id}/view", web::post().to(add_marker_view))
+            .route("/markers/{id}/images", web::get().to(get_marker_images))
+            .route("/markers/{id}/images", web::post().to(add_marker_image))
+            .route("/markers/{id}/images/{image_id}", web::delete().to(delete_marker_image))
+            .route("/markers/{id}/images/{image_id}/primary", web::put().to(set_marker_primary_image))
+            .route("/markers/{id}/images/{image_id}/order", web::put().to(update_marker_image_order))
                 .route("/members/{id}/markers/created", web::get().to(get_member_created_markers))
                 .route("/members/{id}/markers/liked", web::get().to(get_member_liked_markers))
                 .route("/members/{id}/markers/bookmarked", web::get().to(get_member_bookmarked_markers))
+                .route("/members/{id}/markers/connect", web::post().to(connect_member_to_marker))
+                .route("/members/{id}/markers/interactions", web::get().to(get_member_marker_interactions))
+                .route("/members/{id}/markers/interactions/{interaction_type}", web::get().to(get_member_markers_by_interaction))
+                .route("/members/{id}/markers/with-details", web::get().to(get_member_markers_with_details))
+                .route("/members/{id}/markers/stats", web::get().to(get_member_marker_stats))
                 .route("/members", web::post().to(register_member))
                 .route("/members", web::get().to(list_members))
                 .route("/members/me", web::get().to(
                     |db, config, req| get_me(db, config, req)
                 ))
                 .route("/members/{id}", web::get().to(get_member_by_id))
+                .route("/members/{id}/with-markers", web::get().to(get_member_with_markers))
+                .route("/members/{id}/with-marker-details", web::get().to(get_member_with_marker_details))
+                .route("/members/{id}/with-stats", web::get().to(get_member_with_stats))
                 .route("/auth/register", web::post().to(
                     |db, payload, config| register_social_member(db, payload, config)
                 ))
@@ -242,6 +289,7 @@ pub fn setup_routes(config: &mut web::ServiceConfig) {
                 .service(
                     web::scope("/s3")
                         .route("/upload/thumbnail", web::post().to(upload_thumbnail_s3))
+                        .route("/upload/normal", web::post().to(upload_thumbnail_s3))
                         .route("/upload/map", web::post().to(upload_map_s3))
                         .route("/upload/circular", web::post().to(upload_circular_thumbnail_s3))
                 )
@@ -327,9 +375,43 @@ async fn get_markers(
     ).await {
         Ok(markers) => {
             info!("✅ 마커 조회 성공: {}개 마커 반환", markers.len());
+            
+            // 각 마커에 이미지 정보 추가
+            let mut formatted_markers = Vec::new();
+            for marker in &markers {
+                // 마커 이미지 조회
+                let images = match db.get_marker_images(marker.id).await {
+                    Ok(images) => images,
+                    Err(e) => {
+                        warn!("⚠️ 마커 {} 이미지 조회 실패: {}", marker.id, e);
+                        vec![]
+                    }
+                };
+                
+                let formatted_images: Vec<serde_json::Value> = images.iter()
+                    .map(|image| serde_json::json!({
+                        "id": image.id,
+                        "markerId": image.marker_id,
+                        "imageType": image.image_type,
+                        "imageUrl": image.image_url,
+                        "imageOrder": image.image_order,
+                        "isPrimary": image.is_primary,
+                        "createdAt": image.created_at,
+                        "updatedAt": image.updated_at
+                    }))
+                    .collect();
+                
+                let mut marker_data = marker_to_camelcase_json(marker);
+                if let Some(marker_obj) = marker_data.as_object_mut() {
+                    marker_obj.insert("images".to_string(), serde_json::Value::Array(formatted_images));
+                }
+                
+                formatted_markers.push(marker_data);
+            }
+            
             Ok(HttpResponse::Ok().json(serde_json::json!({
                 "success": true,
-                "data": markers,
+                "data": formatted_markers,
                 "count": markers.len()
             })))
         }
@@ -402,7 +484,7 @@ async fn upload_map_image(payload: Multipart, pool: web::Data<PgPool>, config: w
 
 async fn generate_thumbnail(payload: Multipart, pool: web::Data<PgPool>, config: web::Data<Config>) -> Result<HttpResponse> {
     // 250x250 원형 썸네일용 프로세서 생성
-    let processor = ImageProcessor::new(250, 250, 85);
+    let processor = ImageProcessor::new(150, 150, 85);
     upload_circular_thumbnail(payload, "generated_thumbnail", processor, pool, config).await
 }
 
@@ -427,16 +509,11 @@ async fn upload_circular_thumbnail(
                     
                     // 파일 형식 검증
                     if !processor.is_valid_image_format(&filename) {
-                        return Ok(HttpResponse::BadRequest().json(ImageResponse {
-                            success: false,
-                            message: "지원되지 않는 이미지 형식입니다. (jpg, jpeg, png, gif, bmp, webp)".to_string(),
-                            filename: None,
-                            size_mb: None,
-                            width: None,
-                            height: None,
-                            format: None,
-                            url: None,
-                        }));
+                        return Ok(ErrorHandler::bad_request(
+                            "지원되지 않는 이미지 형식입니다. (jpg, jpeg, png, gif, bmp, webp)",
+                            Some(&format!("파일명: {}", filename)),
+                            Some("원형 썸네일 업로드 - 파일 형식 검증 실패")
+                        ));
                     }
                 }
                 
@@ -466,16 +543,11 @@ async fn upload_circular_thumbnail(
     
     // 파일 크기 검증
     if processor.get_file_size_mb(&image_data) > config.max_file_size_mb {
-        return Ok(HttpResponse::BadRequest().json(ImageResponse {
-            success: false,
-            message: "파일 크기는 30MB를 초과할 수 없습니다".to_string(),
-            filename: None,
-            size_mb: None,
-            width: None,
-            height: None,
-            format: None,
-            url: None,
-        }));
+        return Ok(ErrorHandler::bad_request(
+            "파일 크기는 30MB를 초과할 수 없습니다",
+            Some(&format!("현재 크기: {:.2}MB", processor.get_file_size_mb(&image_data))),
+            Some("원형 썸네일 업로드 - 파일 크기 초과")
+        ));
     }
     
     // 원형 썸네일 처리 (크롭 + 원형 마스킹 + WebP 변환)
@@ -1348,11 +1420,15 @@ async fn login_member(
                         }
                         // JWT 생성
                         let token = create_jwt(member.id, &member.email, &config).unwrap_or_default();
+                        let access_token = generate_access_token(member.id, &member.email, &config);
+                        let refresh_token = generate_refresh_token(member.id, &member.email, &config);
                         info!("✅ 이메일 로그인 성공: {}", input.email);
                         return Ok(HttpResponse::Ok().json(serde_json::json!({
                             "success": true,
                             "message": "로그인 성공",
                             "token": token,
+                            "accessToken": access_token,
+                            "refreshToken": refresh_token,
                             "data": {
                                 "member": member_to_camelcase_json(&member),
                                 "authProvider": auth_provider_to_camelcase_json(&auth_provider)
@@ -1369,10 +1445,10 @@ async fn login_member(
         }
         Ok(None) => {
             info!("❌ 존재하지 않는 이메일: {}", input.email);
-            Ok(HttpResponse::Unauthorized().json(serde_json::json!({
-                "success": false,
-                "message": "이메일 또는 비밀번호가 올바르지 않습니다"
-            })))
+            Ok(ErrorHandler::unauthorized(
+                "이메일 또는 비밀번호가 올바르지 않습니다",
+                Some(&format!("이메일: {}", input.email))
+            ))
         }
         Err(e) => {
             error!("❌ 로그인 처리 실패: {}", e);
@@ -1405,11 +1481,15 @@ async fn social_login(
             }
             // JWT 생성
             let token = create_jwt(member.id, &member.email, &config).unwrap_or_default();
+            let access_token = generate_access_token(member.id, &member.email, &config);
+            let refresh_token = generate_refresh_token(member.id, &member.email, &config);
             info!("✅ 소셜 로그인 성공: {}", member.email);
             Ok(HttpResponse::Ok().json(serde_json::json!({
                 "success": true,
                 "message": "소셜 로그인 성공",
                 "token": token,
+                "accessToken": access_token,
+                "refreshToken": refresh_token,
                 "data": {
                     "member": member_to_camelcase_json(&member),
                     "authProvider": auth_provider_to_camelcase_json(&auth_provider)
@@ -1447,10 +1527,10 @@ async fn get_me(
 ) -> Result<HttpResponse> {
     let auth_header = req.headers().get("Authorization").and_then(|h| h.to_str().ok());
     if auth_header.is_none() || !auth_header.unwrap().starts_with("Bearer ") {
-        return Ok(HttpResponse::Unauthorized().json(serde_json::json!({
-            "success": false,
-            "message": "No Bearer token"
-        })));
+        return Ok(ErrorHandler::unauthorized(
+            "No Bearer token",
+            Some("Authorization 헤더가 없거나 Bearer 형식이 아닙니다")
+        ));
     }
     let token = &auth_header.unwrap()[7..];
     let validation = Validation::default();
@@ -1461,19 +1541,19 @@ async fn get_me(
     ) {
         Ok(data) => data.claims,
         Err(e) => {
-            return Ok(HttpResponse::Unauthorized().json(serde_json::json!({
-                "success": false,
-                "message": format!("Invalid token: {}", e)
-            })));
+            return Ok(ErrorHandler::unauthorized(
+                "Invalid token",
+                Some(&format!("토큰 검증 실패: {}", e))
+            ));
         }
     };
     let user_id: i64 = match claims.sub.parse() {
         Ok(id) => id,
         Err(_) => {
-            return Ok(HttpResponse::Unauthorized().json(serde_json::json!({
-                "success": false,
-                "message": "Invalid user id in token"
-            })));
+            return Ok(ErrorHandler::unauthorized(
+                "Invalid user id in token",
+                Some(&format!("토큰의 사용자 ID 파싱 실패: {}", claims.sub))
+            ));
         }
     };
     match db.get_member_by_id(user_id).await {
@@ -1533,6 +1613,22 @@ fn generate_access_token(user_id: i64, email: &str, config: &Config) -> String {
     ).unwrap_or_default()
 }
 
+/// 리프레시 토큰 생성
+fn generate_refresh_token(user_id: i64, email: &str, config: &Config) -> String {
+    use chrono::Duration;
+    let expiration = Utc::now() + Duration::days(30); // 30일 유효
+    let claims = Claims {
+        sub: user_id.to_string(),
+        email: email.to_string(),
+        exp: expiration.timestamp() as usize,
+    };
+    encode(
+        &Header::default(),
+        &claims,
+        &EncodingKey::from_secret(config.jwt_secret.as_bytes()),
+    ).unwrap_or_default()
+}
+
 /// 구글 ID 토큰으로 로그인/회원가입
 async fn google_id_token_login(
     db: web::Data<Database>,
@@ -1551,14 +1647,10 @@ async fn google_id_token_login(
         }
         Err(e) => {
             error!("❌ 구글 ID 토큰 검증 실패: {}", e);
-            return Ok(HttpResponse::Unauthorized().json(GoogleIdTokenResponse {
-                success: false,
-                message: format!("ID 토큰 검증 실패: {}", e),
-                data: None,
-                token: None,
-                access_token: None,
-                is_new_user: None,
-            }));
+            return Ok(ErrorHandler::unauthorized(
+                "ID 토큰 검증 실패",
+                Some(&format!("구글 토큰 검증 오류: {}", e))
+            ));
         }
     };
     
@@ -1574,6 +1666,7 @@ async fn google_id_token_login(
         // JWT 생성
         let token = create_jwt(existing_member.id, &existing_member.email, &config).unwrap_or_default();
         let access_token = generate_access_token(existing_member.id, &existing_member.email, &config);
+        let refresh_token = generate_refresh_token(existing_member.id, &existing_member.email, &config);
         return Ok(HttpResponse::Ok().json(GoogleIdTokenResponse {
             success: true,
             message: "기존 계정으로 로그인 성공".to_string(),
@@ -1584,6 +1677,7 @@ async fn google_id_token_login(
             })),
             token: Some(token),
             access_token: Some(access_token),
+            refresh_token: Some(refresh_token),
             is_new_user: Some(false),
         }));
     }
@@ -1604,6 +1698,7 @@ async fn google_id_token_login(
                 // JWT 생성
                 let token = create_jwt(existing_member.id, &existing_member.email, &config).unwrap_or_default();
                 let access_token = generate_access_token(existing_member.id, &existing_member.email, &config);
+                let refresh_token = generate_refresh_token(existing_member.id, &existing_member.email, &config);
                 return Ok(HttpResponse::Ok().json(GoogleIdTokenResponse {
                     success: true,
                     message: "기존 계정에 구글 로그인 연결 성공".to_string(),
@@ -1614,6 +1709,7 @@ async fn google_id_token_login(
                     })),
                     token: Some(token),
                     access_token: Some(access_token),
+                    refresh_token: Some(refresh_token),
                     is_new_user: Some(false),
                 }));
             }
@@ -1625,6 +1721,7 @@ async fn google_id_token_login(
                     data: None,
                     token: None,
                     access_token: None,
+                    refresh_token: None,
                     is_new_user: None,
                 }));
             }
@@ -1661,6 +1758,7 @@ async fn google_id_token_login(
             // JWT 생성
             let token = create_jwt(member.id, &member.email, &config).unwrap_or_default();
             let access_token = generate_access_token(member.id, &member.email, &config);
+            let refresh_token = generate_refresh_token(member.id, &member.email, &config);
             Ok(HttpResponse::Ok().json(GoogleIdTokenResponse {
                 success: true,
                 message: "구글 회원가입 성공".to_string(),
@@ -1671,6 +1769,7 @@ async fn google_id_token_login(
                 })),
                 token: Some(token),
                 access_token: Some(access_token),
+                refresh_token: Some(refresh_token),
                 is_new_user: Some(true),
             }))
         }
@@ -1682,11 +1781,193 @@ async fn google_id_token_login(
                 data: None,
                 token: None,
                 access_token: None,
+                refresh_token: None,
                 is_new_user: None,
             }))
         }
+        }
+}
+
+// 마커 이미지 관련 핸들러들
+async fn get_marker_images(
+    db: web::Data<Database>,
+    path: web::Path<i64>,
+) -> Result<HttpResponse> {
+    let marker_id = path.into_inner() as i32;
+    
+    info!("🖼️ 마커 이미지 조회 요청: 마커 ID {}", marker_id);
+    
+    match db.get_marker_images(marker_id).await {
+        Ok(images) => {
+            info!("✅ 마커 이미지 조회 성공: {}개 이미지", images.len());
+            let formatted_images: Vec<serde_json::Value> = images.iter()
+                .map(|image| serde_json::json!({
+                    "id": image.id,
+                    "markerId": image.marker_id,
+                    "imageType": image.image_type,
+                    "imageUrl": image.image_url,
+                    "imageOrder": image.image_order,
+                    "isPrimary": image.is_primary,
+                    "createdAt": image.created_at,
+                    "updatedAt": image.updated_at
+                }))
+                .collect();
+            
+            Ok(HttpResponse::Ok().json(serde_json::json!({
+                "success": true,
+                "message": "마커 이미지 조회 성공",
+                "data": formatted_images,
+                "count": images.len()
+            })))
+        }
+        Err(e) => {
+            error!("❌ 마커 이미지 조회 실패: {}", e);
+            Ok(ErrorHandler::internal_server_error(
+                "마커 이미지 조회 실패",
+                Some(&format!("데이터베이스 오류: {}", e))
+            ))
+        }
     }
-} 
+}
+
+async fn add_marker_image(
+    db: web::Data<Database>,
+    path: web::Path<i64>,
+    payload: web::Json<AddMarkerImageRequest>,
+) -> Result<HttpResponse> {
+    let marker_id = path.into_inner() as i32;
+    let input = payload.into_inner();
+    
+    info!("🖼️ 마커 이미지 추가 요청: 마커 ID {}, 이미지 타입 {}", marker_id, input.image_type);
+    
+    let image_order = input.image_order.unwrap_or(0);
+    let is_primary = input.is_primary.unwrap_or(false);
+    
+    match db.add_marker_image(marker_id, &input.image_type, &input.image_url, image_order, is_primary).await {
+        Ok(image_id) => {
+            info!("✅ 마커 이미지 추가 성공: 이미지 ID {}", image_id);
+            Ok(HttpResponse::Ok().json(serde_json::json!({
+                "success": true,
+                "message": "마커 이미지 추가 성공",
+                "data": {
+                    "imageId": image_id,
+                    "markerId": marker_id,
+                    "imageType": input.image_type,
+                    "imageUrl": input.image_url,
+                    "imageOrder": image_order,
+                    "isPrimary": is_primary
+                }
+            })))
+        }
+        Err(e) => {
+            error!("❌ 마커 이미지 추가 실패: {}", e);
+            Ok(ErrorHandler::internal_server_error(
+                "마커 이미지 추가 실패",
+                Some(&format!("데이터베이스 오류: {}", e))
+            ))
+        }
+    }
+}
+
+async fn delete_marker_image(
+    db: web::Data<Database>,
+    path: web::Path<(i64, i32)>,
+) -> Result<HttpResponse> {
+    let (marker_id, image_id) = path.into_inner();
+    let marker_id = marker_id as i32;
+    
+    info!("🗑️ 마커 이미지 삭제 요청: 마커 ID {}, 이미지 ID {}", marker_id, image_id);
+    
+    match db.delete_marker_image(image_id).await {
+        Ok(deleted) => {
+            if deleted {
+                info!("✅ 마커 이미지 삭제 성공: 이미지 ID {}", image_id);
+                Ok(HttpResponse::Ok().json(serde_json::json!({
+                    "success": true,
+                    "message": "마커 이미지 삭제 성공",
+                    "data": {
+                        "imageId": image_id,
+                        "deleted": true
+                    }
+                })))
+            } else {
+                info!("⚠️ 마커 이미지가 존재하지 않음: 이미지 ID {}", image_id);
+                Ok(ErrorHandler::not_found("마커 이미지를 찾을 수 없습니다"))
+            }
+        }
+        Err(e) => {
+            error!("❌ 마커 이미지 삭제 실패: {}", e);
+            Ok(ErrorHandler::internal_server_error(
+                "마커 이미지 삭제 실패",
+                Some(&format!("데이터베이스 오류: {}", e))
+            ))
+        }
+    }
+}
+
+async fn set_marker_primary_image(
+    db: web::Data<Database>,
+    path: web::Path<(i64, i32)>,
+) -> Result<HttpResponse> {
+    let (marker_id, image_id) = path.into_inner();
+    let marker_id = marker_id as i32;
+    
+    info!("⭐ 마커 대표 이미지 설정 요청: 마커 ID {}, 이미지 ID {}", marker_id, image_id);
+    
+    match db.set_marker_primary_image(marker_id, image_id).await {
+        Ok(_) => {
+            info!("✅ 마커 대표 이미지 설정 성공: 이미지 ID {}", image_id);
+            Ok(HttpResponse::Ok().json(serde_json::json!({
+                "success": true,
+                "message": "마커 대표 이미지 설정 성공",
+                "data": {
+                    "markerId": marker_id,
+                    "primaryImageId": image_id
+                }
+            })))
+        }
+        Err(e) => {
+            error!("❌ 마커 대표 이미지 설정 실패: {}", e);
+            Ok(ErrorHandler::internal_server_error(
+                "마커 대표 이미지 설정 실패",
+                Some(&format!("데이터베이스 오류: {}", e))
+            ))
+        }
+    }
+}
+
+async fn update_marker_image_order(
+    db: web::Data<Database>,
+    path: web::Path<(i64, i32)>,
+    payload: web::Json<UpdateMarkerImageOrderRequest>,
+) -> Result<HttpResponse> {
+    let (marker_id, image_id) = path.into_inner();
+    let marker_id = marker_id as i32;
+    let input = payload.into_inner();
+    
+    info!("📝 마커 이미지 순서 변경 요청: 마커 ID {}, 이미지 ID {}, 새 순서 {}", marker_id, image_id, input.image_order);
+    
+    match db.update_marker_image_order(image_id, input.image_order).await {
+        Ok(_) => {
+            info!("✅ 마커 이미지 순서 변경 성공: 이미지 ID {}", image_id);
+            Ok(HttpResponse::Ok().json(serde_json::json!({
+                "success": true,
+                "message": "마커 이미지 순서 변경 성공",
+                "data": {
+                    "imageId": image_id,
+                    "newOrder": input.image_order
+                }
+            })))
+        }
+        Err(e) => {
+            error!("❌ 마커 이미지 순서 변경 실패: {}", e);
+            Ok(ErrorHandler::internal_server_error(
+                "마커 이미지 순서 변경 실패",
+                Some(&format!("데이터베이스 오류: {}", e))
+            ))
+        }
+    }
+}
 
 /// Member를 카멜케이스 JSON으로 변환
 fn member_to_camelcase_json(member: &Member) -> serde_json::Value {
@@ -1784,6 +2065,7 @@ fn marker_to_camelcase_json(marker: &crate::database::Marker) -> serde_json::Val
 
     serde_json::json!({
         "id": marker.id,
+        "memberId": marker.member_id,
         "latitude": latitude,
         "longitude": longitude,
         "emotionTag": marker.emotion_tag,
@@ -1792,7 +2074,9 @@ fn marker_to_camelcase_json(marker: &crate::database::Marker) -> serde_json::Val
         "dislikes": marker.dislikes,
         "views": marker.views,
         "author": marker.author,
-        "thumbnailImg": marker.thumbnail_img
+        "thumbnailImg": marker.thumbnail_img,
+        "createdAt": marker.created_at,
+        "updatedAt": marker.updated_at
     })
 }
 
@@ -1800,34 +2084,118 @@ fn marker_to_camelcase_json(marker: &crate::database::Marker) -> serde_json::Val
 async fn create_marker(
     db: web::Data<Database>,
     payload: web::Json<CreateMarkerRequest>,
+    config: web::Data<Config>,
+    req: actix_web::HttpRequest,
 ) -> Result<HttpResponse> {
     let input = payload.into_inner();
     
-    info!("📍 마커 생성 요청: 위치 ({}, {})", input.latitude, input.longitude);
+    // JWT 토큰에서 사용자 ID 추출
+    let user_id = match extract_user_id_from_token(&req, &config) {
+        Ok(id) => id,
+        Err(_) => {
+            return Ok(ErrorHandler::unauthorized(
+                "로그인이 필요합니다. JWT 토큰을 확인해주세요.",
+                Some("마커 생성 - 토큰 추출 실패")
+            ));
+        }
+    };
+    
+    // 사용자 정보 조회
+    let user = match db.get_member_by_id(user_id).await {
+        Ok(Some(member)) => member,
+        Ok(None) => {
+            return Ok(HttpResponse::NotFound().json(MarkerResponse {
+                success: false,
+                message: "사용자를 찾을 수 없습니다.".to_string(),
+                data: None,
+            }));
+        }
+        Err(e) => {
+            error!("❌ 사용자 조회 실패: {}", e);
+            return Ok(HttpResponse::InternalServerError().json(MarkerResponse {
+                success: false,
+                message: format!("사용자 조회 실패: {}", e),
+                data: None,
+            }));
+        }
+    };
+    
+    info!("📍 마커 생성 요청: 사용자 {} ({}), 위치 ({}, {})", user.nickname, user_id, input.latitude, input.longitude);
+    
+    // 이미지 정보 로깅
+    if let Some(ref images) = input.images {
+        info!("   - 이미지 {}개 포함", images.len());
+        for (i, img) in images.iter().enumerate() {
+            info!("     {}. {} (타입: {}, 순서: {}, 대표: {})", 
+                i + 1, img.image_url, img.image_type, 
+                img.image_order.unwrap_or(0), 
+                img.is_primary.unwrap_or(false));
+        }
+    }
     
     match db.create_marker(
+        user_id,
         input.latitude,
         input.longitude,
         &input.emotion_tag,
         &input.description,
-        "익명", // 기본 작성자
+        &user.nickname, // 실제 사용자 닉네임 사용
         input.thumbnail_img.as_deref(),
     ).await {
         Ok(marker) => {
-            info!("✅ 마커 생성 성공: ID {}", marker.id);
+            info!("✅ 마커 생성 성공: ID {}, 작성자 {}", marker.id, user.nickname);
+            
+            // 이미지들 추가
+            let mut added_images = Vec::new();
+            if let Some(images) = input.images {
+                for (index, image_req) in images.into_iter().enumerate() {
+                    let image_order = image_req.image_order.unwrap_or(index as i32);
+                    let is_primary = image_req.is_primary.unwrap_or(index == 0); // 첫 번째 이미지를 기본 대표로 설정
+                    
+                    match db.add_marker_image(
+                        marker.id,
+                        &image_req.image_type,
+                        &image_req.image_url,
+                        image_order,
+                        is_primary,
+                    ).await {
+                        Ok(image_id) => {
+                            info!("✅ 이미지 추가 성공: ID {}, 타입 {}", image_id, image_req.image_type);
+                            added_images.push(serde_json::json!({
+                                "id": image_id,
+                                "markerId": marker.id,
+                                "imageType": image_req.image_type,
+                                "imageUrl": image_req.image_url,
+                                "imageOrder": image_order,
+                                "isPrimary": is_primary
+                            }));
+                        }
+                        Err(e) => {
+                            error!("❌ 이미지 추가 실패: {}", e);
+                            // 이미지 추가 실패해도 마커는 생성되었으므로 경고만 남김
+                        }
+                    }
+                }
+            }
+            
+            // 응답 데이터 구성
+            let mut marker_data = marker_to_camelcase_json(&marker);
+            if let Some(marker_obj) = marker_data.as_object_mut() {
+                marker_obj.insert("images".to_string(), serde_json::Value::Array(added_images));
+            }
+            
             Ok(HttpResponse::Ok().json(MarkerResponse {
                 success: true,
                 message: "마커 생성 성공".to_string(),
-                data: Some(marker_to_camelcase_json(&marker)),
+                data: Some(marker_data),
             }))
         }
         Err(e) => {
             error!("❌ 마커 생성 실패: {}", e);
-            Ok(HttpResponse::InternalServerError().json(MarkerResponse {
-                success: false,
-                message: format!("마커 생성 실패: {}", e),
-                data: None,
-            }))
+            Ok(ErrorHandler::internal_server_error(
+                "마커 생성 실패",
+                Some(&format!("데이터베이스 오류: {}", e))
+            ))
         }
     }
 }
@@ -1843,26 +2211,48 @@ async fn get_marker_detail(
     
     match db.get_marker_detail(marker_id).await {
         Ok(Some(marker)) => {
+            // 마커 이미지 정보도 함께 조회
+            let images = match db.get_marker_images(marker_id as i32).await {
+                Ok(images) => images,
+                Err(e) => {
+                    warn!("⚠️ 마커 이미지 조회 실패: {}", e);
+                    vec![]
+                }
+            };
+            
+            let formatted_images: Vec<serde_json::Value> = images.iter()
+                .map(|image| serde_json::json!({
+                    "id": image.id,
+                    "markerId": image.marker_id,
+                    "imageType": image.image_type,
+                    "imageUrl": image.image_url,
+                    "imageOrder": image.image_order,
+                    "isPrimary": image.is_primary,
+                    "createdAt": image.created_at,
+                    "updatedAt": image.updated_at
+                }))
+                .collect();
+            
+            let marker_data = serde_json::json!({
+                "marker": marker_to_camelcase_json(&marker),
+                "images": formatted_images
+            });
+            
             Ok(HttpResponse::Ok().json(MarkerResponse {
                 success: true,
                 message: "마커 상세 조회 성공".to_string(),
-                data: Some(marker_to_camelcase_json(&marker)),
+                data: Some(marker_data),
             }))
         }
         Ok(None) => {
-            Ok(HttpResponse::NotFound().json(MarkerResponse {
-                success: false,
-                message: "마커를 찾을 수 없습니다".to_string(),
-                data: None,
-            }))
+            Ok(ErrorHandler::not_found("마커를 찾을 수 없습니다"))
         }
         Err(e) => {
             error!("❌ 마커 상세 조회 실패: {}", e);
-            Ok(HttpResponse::InternalServerError().json(MarkerResponse {
-                success: false,
-                message: format!("마커 상세 조회 실패: {}", e),
-                data: None,
-            }))
+            Ok(ErrorHandler::internal_server_error(
+                "마커 상세 조회 실패",
+                Some(&format!("데이터베이스 오류: {}", e))
+            ))
         }
     }
 }
@@ -2102,3 +2492,303 @@ async fn get_member_bookmarked_markers(
         }
     }
 } 
+
+/// 3번 사용자와 마커 연결
+async fn connect_member_to_marker(
+    db: web::Data<Database>,
+    path: web::Path<i64>,
+    payload: web::Json<serde_json::Value>,
+) -> Result<HttpResponse> {
+    let member_id = path.into_inner();
+    let input = payload.into_inner();
+    
+    let marker_id = input.get("marker_id")
+        .and_then(|v| v.as_i64())
+        .ok_or_else(|| actix_web::error::ErrorBadRequest("marker_id is required"))?;
+    
+    let interaction_type = input.get("interaction_type")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| actix_web::error::ErrorBadRequest("interaction_type is required"))?;
+    
+    info!("🔗 사용자 {}와 마커 {} 연결: {}", member_id, marker_id, interaction_type);
+    
+    match db.connect_member_to_marker(member_id, marker_id, interaction_type).await {
+        Ok(_) => {
+            Ok(HttpResponse::Ok().json(serde_json::json!({
+                "success": true,
+                "message": "마커 연결 성공",
+                "data": {
+                    "member_id": member_id,
+                    "marker_id": marker_id,
+                    "interaction_type": interaction_type
+                }
+            })))
+        }
+        Err(e) => {
+            error!("❌ 마커 연결 실패: {}", e);
+            Ok(HttpResponse::InternalServerError().json(serde_json::json!({
+                "success": false,
+                "message": format!("마커 연결 실패: {}", e)
+            })))
+        }
+    }
+}
+
+/// 3번 사용자의 모든 마커 상호작용 조회
+async fn get_member_marker_interactions(
+    db: web::Data<Database>,
+    path: web::Path<i64>,
+) -> Result<HttpResponse> {
+    let member_id = path.into_inner();
+    
+    info!("🔍 사용자 {}의 모든 마커 상호작용 조회", member_id);
+    
+    match db.get_member_marker_interactions(member_id).await {
+        Ok(interactions) => {
+            Ok(HttpResponse::Ok().json(serde_json::json!({
+                "success": true,
+                "message": "마커 상호작용 조회 성공",
+                "data": interactions,
+                "count": interactions.len()
+            })))
+        }
+        Err(e) => {
+            error!("❌ 마커 상호작용 조회 실패: {}", e);
+            Ok(HttpResponse::InternalServerError().json(serde_json::json!({
+                "success": false,
+                "message": format!("마커 상호작용 조회 실패: {}", e)
+            })))
+        }
+    }
+}
+
+/// 3번 사용자의 특정 상호작용 타입 마커 조회
+async fn get_member_markers_by_interaction(
+    db: web::Data<Database>,
+    path: web::Path<(i64, String)>,
+) -> Result<HttpResponse> {
+    let (member_id, interaction_type) = path.into_inner();
+    
+    info!("🔍 사용자 {}의 {} 상호작용 마커 조회", member_id, interaction_type);
+    
+    match db.get_member_markers_by_interaction(member_id, &interaction_type).await {
+        Ok(interactions) => {
+            Ok(HttpResponse::Ok().json(serde_json::json!({
+                "success": true,
+                "message": format!("{} 상호작용 마커 조회 성공", interaction_type),
+                "data": interactions,
+                "count": interactions.len()
+            })))
+        }
+        Err(e) => {
+            error!("❌ {} 상호작용 마커 조회 실패: {}", interaction_type, e);
+            Ok(HttpResponse::InternalServerError().json(serde_json::json!({
+                "success": false,
+                "message": format!("{} 상호작용 마커 조회 실패: {}", interaction_type, e)
+            })))
+        }
+    }
+}
+
+/// 3번 사용자와 마커 상세 정보 함께 조회
+async fn get_member_markers_with_details(
+    db: web::Data<Database>,
+    path: web::Path<i64>,
+) -> Result<HttpResponse> {
+    let member_id = path.into_inner();
+    
+    info!("🔍 사용자 {}의 마커 상세 정보 조회", member_id);
+    
+    match db.get_member_markers_with_details(member_id).await {
+        Ok(details) => {
+            let formatted_details: Vec<serde_json::Value> = details.iter().map(|(member_marker, marker)| {
+                serde_json::json!({
+                    "interaction": {
+                        "id": member_marker.id,
+                        "member_id": member_marker.member_id,
+                        "marker_id": member_marker.marker_id,
+                        "interaction_type": member_marker.interaction_type,
+                        "created_at": member_marker.created_at,
+                        "updated_at": member_marker.updated_at
+                    },
+                    "marker": {
+                        "id": marker.id,
+                        "location": marker.location,
+                        "emotion_tag": marker.emotion_tag,
+                        "description": marker.description,
+                        "likes": marker.likes,
+                        "dislikes": marker.dislikes,
+                        "views": marker.views,
+                        "author": marker.author,
+                        "thumbnail_img": marker.thumbnail_img
+                    }
+                })
+            }).collect();
+            
+            Ok(HttpResponse::Ok().json(serde_json::json!({
+                "success": true,
+                "message": "마커 상세 정보 조회 성공",
+                "data": formatted_details,
+                "count": details.len()
+            })))
+        }
+        Err(e) => {
+            error!("❌ 마커 상세 정보 조회 실패: {}", e);
+            Ok(HttpResponse::InternalServerError().json(serde_json::json!({
+                "success": false,
+                "message": format!("마커 상세 정보 조회 실패: {}", e)
+            })))
+        }
+    }
+}
+
+/// 3번 사용자의 마커 상호작용 통계 조회
+async fn get_member_marker_stats(
+    db: web::Data<Database>,
+    path: web::Path<i64>,
+) -> Result<HttpResponse> {
+    let member_id = path.into_inner();
+    
+    info!("📊 사용자 {}의 마커 상호작용 통계 조회", member_id);
+    
+    match db.get_member_marker_stats(member_id).await {
+        Ok(stats) => {
+            Ok(HttpResponse::Ok().json(serde_json::json!({
+                "success": true,
+                "message": "마커 상호작용 통계 조회 성공",
+                "data": stats
+            })))
+        }
+        Err(e) => {
+            error!("❌ 마커 상호작용 통계 조회 실패: {}", e);
+            Ok(HttpResponse::InternalServerError().json(serde_json::json!({
+                "success": false,
+                "message": format!("마커 상호작용 통계 조회 실패: {}", e)
+            })))
+        }
+    }
+}
+
+/// 유저 조회 (마커 정보 포함)
+async fn get_member_with_markers(
+    db: web::Data<Database>,
+    path: web::Path<i64>,
+) -> Result<HttpResponse> {
+    let member_id = path.into_inner();
+    
+    info!("👤 유저 {} 조회 (마커 정보 포함)", member_id);
+    
+    match db.get_member_with_markers(member_id).await {
+        Ok(Some((member, markers))) => {
+            Ok(HttpResponse::Ok().json(serde_json::json!({
+                "success": true,
+                "message": "유저 조회 성공 (마커 정보 포함)",
+                "data": {
+                    "member": member_to_camelcase_json(&member),
+                    "markers": markers,
+                    "marker_count": markers.len()
+                }
+            })))
+        }
+        Ok(None) => {
+            Ok(HttpResponse::NotFound().json(serde_json::json!({
+                "success": false,
+                "message": "유저를 찾을 수 없습니다."
+            })))
+        }
+        Err(e) => {
+            error!("❌ 유저 조회 실패: {}", e);
+            Ok(HttpResponse::InternalServerError().json(serde_json::json!({
+                "success": false,
+                "message": format!("유저 조회 실패: {}", e)
+            })))
+        }
+    }
+}
+
+/// 유저 조회 (마커 상세 정보 포함)
+async fn get_member_with_marker_details(
+    db: web::Data<Database>,
+    path: web::Path<i64>,
+) -> Result<HttpResponse> {
+    let member_id = path.into_inner();
+    
+    info!("👤 유저 {} 조회 (마커 상세 정보 포함)", member_id);
+    
+    match db.get_member_with_marker_details(member_id).await {
+        Ok(Some((member, marker_details))) => {
+            let formatted_details: Vec<serde_json::Value> = marker_details.iter().map(|(member_marker, marker)| {
+                serde_json::json!({
+                    "interaction": {
+                        "id": member_marker.id,
+                        "member_id": member_marker.member_id,
+                        "marker_id": member_marker.marker_id,
+                        "interaction_type": member_marker.interaction_type,
+                        "created_at": member_marker.created_at,
+                        "updated_at": member_marker.updated_at
+                    },
+                    "marker": marker_to_camelcase_json(marker)
+                })
+            }).collect();
+            
+            Ok(HttpResponse::Ok().json(serde_json::json!({
+                "success": true,
+                "message": "유저 조회 성공 (마커 상세 정보 포함)",
+                "data": {
+                    "member": member_to_camelcase_json(&member),
+                    "marker_details": formatted_details,
+                    "marker_count": marker_details.len()
+                }
+            })))
+        }
+        Ok(None) => {
+            Ok(HttpResponse::NotFound().json(serde_json::json!({
+                "success": false,
+                "message": "유저를 찾을 수 없습니다."
+            })))
+        }
+        Err(e) => {
+            error!("❌ 유저 조회 실패: {}", e);
+            Ok(HttpResponse::InternalServerError().json(serde_json::json!({
+                "success": false,
+                "message": format!("유저 조회 실패: {}", e)
+            })))
+        }
+    }
+}
+
+/// 유저 조회 (마커 통계 포함)
+async fn get_member_with_stats(
+    db: web::Data<Database>,
+    path: web::Path<i64>,
+) -> Result<HttpResponse> {
+    let member_id = path.into_inner();
+    
+    info!("👤 유저 {} 조회 (마커 통계 포함)", member_id);
+    
+    match db.get_member_with_stats(member_id).await {
+        Ok(Some((member, stats))) => {
+            Ok(HttpResponse::Ok().json(serde_json::json!({
+                "success": true,
+                "message": "유저 조회 성공 (마커 통계 포함)",
+                "data": {
+                    "member": member_to_camelcase_json(&member),
+                    "marker_stats": stats
+                }
+            })))
+        }
+        Ok(None) => {
+            Ok(HttpResponse::NotFound().json(serde_json::json!({
+                "success": false,
+                "message": "유저를 찾을 수 없습니다."
+            })))
+        }
+        Err(e) => {
+            error!("❌ 유저 조회 실패: {}", e);
+            Ok(HttpResponse::InternalServerError().json(serde_json::json!({
+                "success": false,
+                "message": format!("유저 조회 실패: {}", e)
+            })))
+        }
+    }
+}

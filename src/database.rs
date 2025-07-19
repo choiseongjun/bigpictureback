@@ -148,14 +148,17 @@ impl Database {
             r#"
             CREATE TABLE IF NOT EXISTS bigpicture.markers (
                 id SERIAL PRIMARY KEY,
+                member_id BIGINT REFERENCES bigpicture.members(id) ON DELETE CASCADE,
                 location GEOGRAPHY(POINT, 4326),
                 emotion_tag TEXT,
                 description TEXT,
-                likes INTEGER,
-                dislikes INTEGER,
-                views INTEGER,
+                likes INTEGER DEFAULT 0,
+                dislikes INTEGER DEFAULT 0,
+                views INTEGER DEFAULT 0,
                 author TEXT,
-                thumbnail_img TEXT
+                thumbnail_img TEXT, -- 기존 썸네일 필드 유지
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
             )
             "#
         )
@@ -163,8 +166,42 @@ impl Database {
         .await?;
         println!("✅ markers 테이블 생성 완료");
         
+        // marker_images 테이블 생성 (마커와 이미지 연결)
+        println!("📋 marker_images 테이블 생성 중...");
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS bigpicture.marker_images (
+                id SERIAL PRIMARY KEY,
+                marker_id INTEGER NOT NULL REFERENCES bigpicture.markers(id) ON DELETE CASCADE,
+                image_type VARCHAR(50) NOT NULL, -- thumbnail, detail, gallery
+                image_url VARCHAR(500) NOT NULL,
+                image_order INTEGER DEFAULT 0, -- 이미지 순서
+                is_primary BOOLEAN DEFAULT false, -- 대표 이미지 여부
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+            )
+            "#
+        )
+        .execute(pool)
+        .await?;
+        println!("✅ marker_images 테이블 생성 완료");
+        
         // 공간 인덱스 생성 (성능 최적화)
         sqlx::query("CREATE INDEX IF NOT EXISTS markers_location_gist ON bigpicture.markers USING GIST (location)")
+            .execute(pool)
+            .await?;
+        
+        // marker_images 인덱스
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_marker_images_marker_id ON bigpicture.marker_images(marker_id)")
+            .execute(pool)
+            .await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_marker_images_image_type ON bigpicture.marker_images(image_type)")
+            .execute(pool)
+            .await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_marker_images_is_primary ON bigpicture.marker_images(is_primary)")
+            .execute(pool)
+            .await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_marker_images_order ON bigpicture.marker_images(marker_id, image_order)")
             .execute(pool)
             .await?;
         
@@ -718,9 +755,9 @@ impl Database {
         info!("   - 정렬: {} {}", sort_column, sort_direction);
         
         let mut query = format!(
-            "SELECT id, ST_AsText(location) as location, emotion_tag, description, likes, dislikes, views, author, thumbnail_img 
+            "SELECT id, member_id, ST_AsText(location) as location, emotion_tag, description, likes, dislikes, views, author, thumbnail_img, created_at, updated_at
              FROM bigpicture.markers 
-             WHERE ST_Within(location, ST_MakeEnvelope({}, {}, {}, {}, 4326))",
+             WHERE ST_Within(location::geometry, ST_MakeEnvelope({}, {}, {}, {}, 4326))",
             lng_min, lat_min, lng_max, lat_max
         );
         
@@ -761,6 +798,137 @@ impl Database {
         info!("   - 쿼리 실행 완료: {}개 결과", markers.len());
         
         Ok(markers)
+    }
+
+    // 마커 이미지 관련 함수들
+    pub async fn add_marker_image(
+        &self,
+        marker_id: i32,
+        image_type: &str,
+        image_url: &str,
+        image_order: i32,
+        is_primary: bool,
+    ) -> Result<i32> {
+        let rec = sqlx::query(
+            r#"
+            INSERT INTO bigpicture.marker_images
+                (marker_id, image_type, image_url, image_order, is_primary)
+            VALUES ($1, $2, $3, $4, $5)
+            RETURNING id
+            "#
+        )
+        .bind(marker_id)
+        .bind(image_type)
+        .bind(image_url)
+        .bind(image_order)
+        .bind(is_primary)
+        .fetch_one(&self.pool)
+        .await?;
+        
+        Ok(rec.get("id"))
+    }
+
+    pub async fn get_marker_images(&self, marker_id: i32) -> Result<Vec<MarkerImage>> {
+        let rows = sqlx::query_as::<_, MarkerImage>(
+            r#"
+            SELECT id, marker_id, image_type, image_url, image_order, is_primary, created_at, updated_at
+            FROM bigpicture.marker_images 
+            WHERE marker_id = $1
+            ORDER BY image_order ASC, created_at ASC
+            "#
+        )
+        .bind(marker_id)
+        .fetch_all(&self.pool)
+        .await?;
+        
+        Ok(rows)
+    }
+
+    pub async fn get_marker_images_by_type(&self, marker_id: i32, image_type: &str) -> Result<Vec<MarkerImage>> {
+        let rows = sqlx::query_as::<_, MarkerImage>(
+            r#"
+            SELECT id, marker_id, image_type, image_url, image_order, is_primary, created_at, updated_at
+            FROM bigpicture.marker_images 
+            WHERE marker_id = $1 AND image_type = $2
+            ORDER BY image_order ASC, created_at ASC
+            "#
+        )
+        .bind(marker_id)
+        .bind(image_type)
+        .fetch_all(&self.pool)
+        .await?;
+        
+        Ok(rows)
+    }
+
+    pub async fn get_marker_primary_image(&self, marker_id: i32) -> Result<Option<MarkerImage>> {
+        let row = sqlx::query_as::<_, MarkerImage>(
+            r#"
+            SELECT id, marker_id, image_type, image_url, image_order, is_primary, created_at, updated_at
+            FROM bigpicture.marker_images 
+            WHERE marker_id = $1 AND is_primary = true
+            LIMIT 1
+            "#
+        )
+        .bind(marker_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        
+        Ok(row)
+    }
+
+    pub async fn update_marker_image_order(&self, image_id: i32, new_order: i32) -> Result<()> {
+        sqlx::query(
+            r#"
+            UPDATE bigpicture.marker_images
+            SET image_order = $1, updated_at = NOW()
+            WHERE id = $2
+            "#
+        )
+        .bind(new_order)
+        .bind(image_id)
+        .execute(&self.pool)
+        .await?;
+        
+        Ok(())
+    }
+
+    pub async fn set_marker_primary_image(&self, marker_id: i32, image_id: i32) -> Result<()> {
+        // 먼저 모든 이미지의 is_primary를 false로 설정
+        sqlx::query(
+            r#"
+            UPDATE bigpicture.marker_images
+            SET is_primary = false, updated_at = NOW()
+            WHERE marker_id = $1
+            "#
+        )
+        .bind(marker_id)
+        .execute(&self.pool)
+        .await?;
+        
+        // 지정된 이미지를 primary로 설정
+        sqlx::query(
+            r#"
+            UPDATE bigpicture.marker_images
+            SET is_primary = true, updated_at = NOW()
+            WHERE id = $1 AND marker_id = $2
+            "#
+        )
+        .bind(image_id)
+        .bind(marker_id)
+        .execute(&self.pool)
+        .await?;
+        
+        Ok(())
+    }
+
+    pub async fn delete_marker_image(&self, image_id: i32) -> Result<bool> {
+        let result = sqlx::query("DELETE FROM bigpicture.marker_images WHERE id = $1")
+            .bind(image_id)
+            .execute(&self.pool)
+            .await?;
+        
+        Ok(result.rows_affected() > 0)
     }
 
     /// 회원 등록
@@ -805,6 +973,48 @@ impl Database {
         .fetch_optional(&self.pool)
         .await?;
         Ok(rec)
+    }
+
+    /// 회원 조회 by id (마커 정보 포함)
+    pub async fn get_member_with_markers(&self, id: i64) -> Result<Option<(Member, Vec<MemberMarker>)>> {
+        // 회원 정보 조회
+        let member = match self.get_member_by_id(id).await? {
+            Some(member) => member,
+            None => return Ok(None),
+        };
+        
+        // 회원의 마커 상호작용 조회
+        let markers = self.get_member_marker_interactions(id).await?;
+        
+        Ok(Some((member, markers)))
+    }
+
+    /// 회원 조회 by id (마커 상세 정보 포함)
+    pub async fn get_member_with_marker_details(&self, id: i64) -> Result<Option<(Member, Vec<(MemberMarker, Marker)>)>> {
+        // 회원 정보 조회
+        let member = match self.get_member_by_id(id).await? {
+            Some(member) => member,
+            None => return Ok(None),
+        };
+        
+        // 회원의 마커 상세 정보 조회
+        let marker_details = self.get_member_markers_with_details(id).await?;
+        
+        Ok(Some((member, marker_details)))
+    }
+
+    /// 회원 조회 by id (마커 통계 포함)
+    pub async fn get_member_with_stats(&self, id: i64) -> Result<Option<(Member, serde_json::Value)>> {
+        // 회원 정보 조회
+        let member = match self.get_member_by_id(id).await? {
+            Some(member) => member,
+            None => return Ok(None),
+        };
+        
+        // 회원의 마커 통계 조회
+        let stats = self.get_member_marker_stats(id).await?;
+        
+        Ok(Some((member, stats)))
     }
 
     /// 회원 조회 by email
@@ -1129,6 +1339,7 @@ impl Database {
     /// 마커 생성
     pub async fn create_marker(
         &self,
+        member_id: i64,
         latitude: f64,
         longitude: f64,
         emotion_tag: &str,
@@ -1139,11 +1350,12 @@ impl Database {
         let marker = sqlx::query_as::<_, Marker>(
             r#"
             INSERT INTO bigpicture.markers
-                (location, emotion_tag, description, author, thumbnail_img)
-            VALUES (ST_SetSRID(ST_MakePoint($1, $2), 4326), $3, $4, $5, $6)
-            RETURNING id, ST_AsText(location) as location, emotion_tag, description, likes, dislikes, views, author, thumbnail_img
+                (member_id, location, emotion_tag, description, author, thumbnail_img)
+            VALUES ($1, ST_SetSRID(ST_MakePoint($2, $3), 4326)::geography, $4, $5, $6, $7)
+            RETURNING id, member_id, ST_AsText(location) as location, emotion_tag, description, likes, dislikes, views, author, thumbnail_img, created_at, updated_at
             "#
         )
+        .bind(member_id)
         .bind(longitude) // PostGIS는 (longitude, latitude) 순서
         .bind(latitude)
         .bind(emotion_tag)
@@ -1410,13 +1622,160 @@ impl Database {
     /// 마커의 상세 정보 조회
     pub async fn get_marker_detail(&self, marker_id: i64) -> Result<Option<Marker>> {
         let marker = sqlx::query_as::<_, Marker>(
-            "SELECT id, ST_AsText(location) as location, emotion_tag, description, likes, dislikes, views, author, thumbnail_img FROM bigpicture.markers WHERE id = $1"
+            "SELECT id, member_id, ST_AsText(location) as location, emotion_tag, description, likes, dislikes, views, author, thumbnail_img, created_at, updated_at FROM bigpicture.markers WHERE id = $1"
         )
         .bind(marker_id)
         .fetch_optional(&self.pool)
         .await?;
 
         Ok(marker)
+    }
+
+    /// 3번 사용자와 마커 연결 (복합키 사용)
+    pub async fn connect_member_to_marker(&self, member_id: i64, marker_id: i64, interaction_type: &str) -> Result<()> {
+        sqlx::query(
+            r#"
+            INSERT INTO bigpicture.member_markers (member_id, marker_id, interaction_type)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (member_id, marker_id, interaction_type) 
+            DO UPDATE SET updated_at = NOW()
+            "#
+        )
+        .bind(member_id)
+        .bind(marker_id)
+        .bind(interaction_type)
+        .execute(&self.pool)
+        .await?;
+        
+        Ok(())
+    }
+
+    /// 3번 사용자의 모든 마커 상호작용 조회
+    pub async fn get_member_marker_interactions(&self, member_id: i64) -> Result<Vec<MemberMarker>> {
+        let recs = sqlx::query_as::<_, MemberMarker>(
+            r#"
+            SELECT id, member_id, marker_id, interaction_type, created_at, updated_at
+            FROM bigpicture.member_markers 
+            WHERE member_id = $1
+            ORDER BY created_at DESC
+            "#
+        )
+        .bind(member_id)
+        .fetch_all(&self.pool)
+        .await?;
+        
+        Ok(recs)
+    }
+
+    /// 3번 사용자의 특정 상호작용 타입 마커 조회
+    pub async fn get_member_markers_by_interaction(&self, member_id: i64, interaction_type: &str) -> Result<Vec<MemberMarker>> {
+        let recs = sqlx::query_as::<_, MemberMarker>(
+            r#"
+            SELECT id, member_id, marker_id, interaction_type, created_at, updated_at
+            FROM bigpicture.member_markers 
+            WHERE member_id = $1 AND interaction_type = $2
+            ORDER BY created_at DESC
+            "#
+        )
+        .bind(member_id)
+        .bind(interaction_type)
+        .fetch_all(&self.pool)
+        .await?;
+        
+        Ok(recs)
+    }
+
+    /// 3번 사용자와 마커 상세 정보 함께 조회 (JOIN)
+    pub async fn get_member_markers_with_details(&self, member_id: i64) -> Result<Vec<(MemberMarker, Marker)>> {
+        let recs = sqlx::query(
+            r#"
+            SELECT 
+                mm.id as mm_id, mm.member_id, mm.marker_id, mm.interaction_type, 
+                mm.created_at as mm_created_at, mm.updated_at as mm_updated_at,
+                m.id as m_id, m.member_id, ST_AsText(m.location) as location, m.emotion_tag, 
+                m.description, m.likes, m.dislikes, m.views, m.author, m.thumbnail_img,
+                m.created_at as m_created_at, m.updated_at as m_updated_at
+            FROM bigpicture.member_markers mm
+            JOIN bigpicture.markers m ON mm.marker_id = m.id
+            WHERE mm.member_id = $1
+            ORDER BY mm.created_at DESC
+            "#
+        )
+        .bind(member_id)
+        .fetch_all(&self.pool)
+        .await?;
+        
+        let mut result = Vec::new();
+        for row in recs {
+            let member_marker = MemberMarker {
+                id: row.get("mm_id"),
+                member_id: row.get("member_id"),
+                marker_id: row.get("marker_id"),
+                interaction_type: row.get("interaction_type"),
+                created_at: row.get("mm_created_at"),
+                updated_at: row.get("mm_updated_at"),
+            };
+            
+            let marker = Marker {
+                id: row.get("m_id"),
+                member_id: row.get("member_id"),
+                location: row.get("location"),
+                emotion_tag: row.get("emotion_tag"),
+                description: row.get("description"),
+                likes: row.get("likes"),
+                dislikes: row.get("dislikes"),
+                views: row.get("views"),
+                author: row.get("author"),
+                thumbnail_img: row.get("thumbnail_img"),
+                created_at: row.get("m_created_at"),
+                updated_at: row.get("m_updated_at"),
+            };
+            
+            result.push((member_marker, marker));
+        }
+        
+        Ok(result)
+    }
+
+    /// 3번 사용자의 마커 상호작용 통계 조회
+    pub async fn get_member_marker_stats(&self, member_id: i64) -> Result<serde_json::Value> {
+        let stats = sqlx::query(
+            r#"
+            SELECT 
+                interaction_type,
+                COUNT(*) as count,
+                MIN(created_at) as first_interaction,
+                MAX(created_at) as last_interaction
+            FROM bigpicture.member_markers 
+            WHERE member_id = $1
+            GROUP BY interaction_type
+            ORDER BY count DESC
+            "#
+        )
+        .bind(member_id)
+        .fetch_all(&self.pool)
+        .await?;
+        
+        let mut result = serde_json::Map::new();
+        for row in stats {
+            let interaction_type: String = row.get("interaction_type");
+            let count: i64 = row.get("count");
+            let first_interaction: Option<chrono::DateTime<chrono::Utc>> = row.get("first_interaction");
+            let last_interaction: Option<chrono::DateTime<chrono::Utc>> = row.get("last_interaction");
+            
+            let mut interaction_data = serde_json::Map::new();
+            interaction_data.insert("count".to_string(), serde_json::Value::Number(count.into()));
+            if let Some(first) = first_interaction {
+                interaction_data.insert("first_interaction".to_string(), serde_json::Value::String(first.to_rfc3339()));
+            }
+            if let Some(last) = last_interaction {
+                interaction_data.insert("last_interaction".to_string(), serde_json::Value::String(last.to_rfc3339()));
+            }
+            
+            result.insert(interaction_type, serde_json::Value::Object(interaction_data));
+        }
+        
+        Ok(serde_json::Value::Object(result))
     }
 }
 
@@ -1474,6 +1833,7 @@ pub struct ImageInfo {
 #[derive(sqlx::FromRow, Debug, serde::Serialize)]
 pub struct Marker {
     pub id: i32,
+    pub member_id: Option<i64>, // 마커를 생성한 사용자 ID
     pub location: Option<String>, // PostGIS geography 타입 (WKT 형식)
     pub emotion_tag: Option<String>,
     pub description: Option<String>,
@@ -1481,7 +1841,58 @@ pub struct Marker {
     pub dislikes: i32,
     pub views: i32,
     pub author: Option<String>,
-    pub thumbnail_img: Option<String>,
+    pub thumbnail_img: Option<String>, // 기존 썸네일 필드 유지
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(sqlx::FromRow)]
+pub struct MarkerImage {
+    pub id: i32,
+    pub marker_id: i32,
+    pub image_type: String, // thumbnail, detail, gallery
+    pub image_url: String,
+    pub image_order: i32,
+    pub is_primary: bool,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+impl Marker {
+    /// WKT 문자열에서 위도/경도 추출
+    pub fn get_latitude(&self) -> Option<f64> {
+        self.location.as_ref().and_then(|wkt| {
+            // POINT(lng lat) 형식에서 lat 추출
+            if wkt.starts_with("POINT(") && wkt.ends_with(")") {
+                let coords = &wkt[6..wkt.len()-1]; // POINT( 제거하고 ) 제거
+                let parts: Vec<&str> = coords.split_whitespace().collect();
+                if parts.len() == 2 {
+                    parts[1].parse::<f64>().ok()
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        })
+    }
+
+    pub fn get_longitude(&self) -> Option<f64> {
+        self.location.as_ref().and_then(|wkt| {
+            // POINT(lng lat) 형식에서 lng 추출
+            if wkt.starts_with("POINT(") && wkt.ends_with(")") {
+                let coords = &wkt[6..wkt.len()-1]; // POINT( 제거하고 ) 제거
+                let parts: Vec<&str> = coords.split_whitespace().collect();
+                if parts.len() == 2 {
+                    parts[0].parse::<f64>().ok()
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        })
+    }
 }
 
 #[derive(sqlx::FromRow, serde::Serialize, serde::Deserialize, Debug)]

@@ -1,0 +1,298 @@
+# 마커 이미지 관련 API 테스트 명령어
+
+## 1. 마커 이미지 조회
+# GET /api/markers/{marker_id}/images
+curl -X GET "http://localhost:5500/api/markers/1/images" \
+  -H "Content-Type: application/json"
+
+## 2. 마커에 이미지 추가
+# POST /api/markers/{marker_id}/images
+curl -X POST "http://localhost:5500/api/markers/1/images" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "image_url": "https://example.com/image1.jpg",
+    "image_type": "thumbnail",
+    "image_order": 0,
+    "is_primary": true
+  }'
+
+curl -X POST "http://localhost:5500/api/markers/1/images" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "image_url": "https://example.com/image2.jpg",
+    "image_type": "gallery",
+    "image_order": 1,
+    "is_primary": false
+  }'
+
+curl -X POST "http://localhost:5500/api/markers/1/images" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "image_url": "https://example.com/image3.jpg",
+    "image_type": "detail",
+    "image_order": 2,
+    "is_primary": false
+  }'
+
+## 3. 마커 이미지 삭제
+# DELETE /api/markers/{marker_id}/images/{image_id}
+curl -X DELETE "http://localhost:5500/api/markers/1/images/2" \
+  -H "Content-Type: application/json"
+
+## 4. 마커 대표 이미지 설정
+# PUT /api/markers/{marker_id}/images/{image_id}/primary
+curl -X PUT "http://localhost:5500/api/markers/1/images/3/primary" \
+  -H "Content-Type: application/json"
+
+## 5. 마커 이미지 순서 변경
+# PUT /api/markers/{marker_id}/images/{image_id}/order
+curl -X PUT "http://localhost:5500/api/markers/1/images/3/order" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "image_order": 0
+  }'
+
+## 6. 마커 상세 조회 (이미지 포함)
+# GET /api/markers/{marker_id}
+curl -X GET "http://localhost:5500/api/markers/1" \
+  -H "Content-Type: application/json"
+
+## 7. 마커 생성 (기존 썸네일 + 여러 이미지 포함)
+# POST /api/markers
+curl -X POST "http://localhost:5500/api/markers" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN" \
+  -d '{
+    "latitude": 37.5665,
+    "longitude": 126.9780,
+    "emotion_tag": "😊",
+    "description": "서울 시청에서 찍은 사진",
+    "thumbnail_img": "https://example.com/thumbnail.jpg",
+    "images": [
+      {
+        "image_url": "https://example.com/image1.jpg",
+        "image_type": "thumbnail",
+        "image_order": 0,
+        "is_primary": true
+      },
+      {
+        "image_url": "https://example.com/image2.jpg",
+        "image_type": "gallery",
+        "image_order": 1,
+        "is_primary": false
+      },
+      {
+        "image_url": "https://example.com/image3.jpg",
+        "image_type": "detail",
+        "image_order": 2,
+        "is_primary": false
+      }
+    ]
+  }'
+
+# 마커 생성 (이미지 없이)
+curl -X POST "http://localhost:5500/api/markers" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN" \
+  -d '{
+    "latitude": 37.5665,
+    "longitude": 126.9780,
+    "emotion_tag": "행복",
+    "description": "서울에서 행복한 순간"
+  }'
+
+## 8. 마커 목록 조회 (기존 썸네일 포함)
+# GET /api/markers?lat=37.5665&lng=126.9780&lat_delta=0.1&lng_delta=0.1
+curl -X GET "http://localhost:5500/api/markers?lat=37.5665&lng=126.9780&lat_delta=0.1&lng_delta=0.1" \
+  -H "Content-Type: application/json"
+
+## 응답 예시
+
+### 마커 이미지 조회 응답
+{
+  "success": true,
+  "message": "마커 이미지 조회 성공",
+  "data": [
+    {
+      "id": 1,
+      "markerId": 1,
+      "imageType": "thumbnail",
+      "imageUrl": "https://example.com/image1.jpg",
+      "imageOrder": 0,
+      "isPrimary": true,
+      "createdAt": "2024-01-01T00:00:00Z",
+      "updatedAt": "2024-01-01T00:00:00Z"
+    },
+    {
+      "id": 2,
+      "markerId": 1,
+      "imageType": "gallery",
+      "imageUrl": "https://example.com/image2.jpg",
+      "imageOrder": 1,
+      "isPrimary": false,
+      "createdAt": "2024-01-01T00:00:00Z",
+      "updatedAt": "2024-01-01T00:00:00Z"
+    }
+  ],
+  "count": 2
+}
+
+### 마커 생성 응답 (이미지 포함)
+{
+  "success": true,
+  "message": "마커 생성 성공",
+  "data": {
+    "id": 1,
+    "latitude": 37.5665,
+    "longitude": 126.9780,
+    "emotionTag": "😊",
+    "description": "서울 시청에서 찍은 사진",
+    "likes": 0,
+    "dislikes": 0,
+    "views": 0,
+    "author": "사용자명",
+    "thumbnailImg": "https://example.com/thumbnail.jpg",
+    "createdAt": "2024-01-01T00:00:00Z",
+    "updatedAt": "2024-01-01T00:00:00Z",
+    "images": [
+      {
+        "id": 1,
+        "markerId": 1,
+        "imageType": "thumbnail",
+        "imageUrl": "https://example.com/image1.jpg",
+        "imageOrder": 0,
+        "isPrimary": true
+      },
+      {
+        "id": 2,
+        "markerId": 1,
+        "imageType": "gallery",
+        "imageUrl": "https://example.com/image2.jpg",
+        "imageOrder": 1,
+        "isPrimary": false
+      },
+      {
+        "id": 3,
+        "markerId": 1,
+        "imageType": "detail",
+        "imageUrl": "https://example.com/image3.jpg",
+        "imageOrder": 2,
+        "isPrimary": false
+      }
+    ]
+  }
+}
+
+### 마커 상세 조회 응답 (이미지 포함)
+{
+  "success": true,
+  "message": "마커 상세 조회 성공",
+  "data": {
+    "marker": {
+      "id": 1,
+      "latitude": 37.5665,
+      "longitude": 126.9780,
+      "emotionTag": "😊",
+      "description": "서울 시청에서 찍은 사진",
+      "likes": 10,
+      "dislikes": 2,
+      "views": 100,
+      "author": "사용자명",
+      "thumbnailImg": "https://example.com/thumbnail.jpg",
+      "createdAt": "2024-01-01T00:00:00Z",
+      "updatedAt": "2024-01-01T00:00:00Z"
+    },
+    "images": [
+      {
+        "id": 1,
+        "markerId": 1,
+        "imageType": "thumbnail",
+        "imageUrl": "https://example.com/image1.jpg",
+        "imageOrder": 0,
+        "isPrimary": true,
+        "createdAt": "2024-01-01T00:00:00Z",
+        "updatedAt": "2024-01-01T00:00:00Z"
+      },
+      {
+        "id": 2,
+        "markerId": 1,
+        "imageType": "gallery",
+        "imageUrl": "https://example.com/image2.jpg",
+        "imageOrder": 1,
+        "isPrimary": false,
+        "createdAt": "2024-01-01T00:00:00Z",
+        "updatedAt": "2024-01-01T00:00:00Z"
+      }
+    ]
+  }
+}
+
+### 마커 목록 조회 응답 (각 마커에 이미지 포함)
+{
+  "success": true,
+  "data": [
+    {
+      "id": 1,
+      "latitude": 37.5665,
+      "longitude": 126.9780,
+      "emotionTag": "😊",
+      "description": "서울 시청에서 찍은 사진",
+      "likes": 10,
+      "dislikes": 2,
+      "views": 100,
+      "author": "사용자명",
+      "thumbnailImg": "https://example.com/thumbnail.jpg",
+      "createdAt": "2024-01-01T00:00:00Z",
+      "updatedAt": "2024-01-01T00:00:00Z",
+      "images": [
+        {
+          "id": 1,
+          "markerId": 1,
+          "imageType": "thumbnail",
+          "imageUrl": "https://example.com/image1.jpg",
+          "imageOrder": 0,
+          "isPrimary": true,
+          "createdAt": "2024-01-01T00:00:00Z",
+          "updatedAt": "2024-01-01T00:00:00Z"
+        },
+        {
+          "id": 2,
+          "markerId": 1,
+          "imageType": "gallery",
+          "imageUrl": "https://example.com/image2.jpg",
+          "imageOrder": 1,
+          "isPrimary": false,
+          "createdAt": "2024-01-01T00:00:00Z",
+          "updatedAt": "2024-01-01T00:00:00Z"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "latitude": 37.5665,
+      "longitude": 126.9780,
+      "emotionTag": "행복",
+      "description": "서울에서 행복한 순간",
+      "likes": 5,
+      "dislikes": 1,
+      "views": 50,
+      "author": "다른사용자",
+      "thumbnailImg": "https://example.com/thumbnail2.jpg",
+      "createdAt": "2024-01-01T00:00:00Z",
+      "updatedAt": "2024-01-01T00:00:00Z",
+      "images": [
+        {
+          "id": 3,
+          "markerId": 2,
+          "imageType": "thumbnail",
+          "imageUrl": "https://example.com/image3.jpg",
+          "imageOrder": 0,
+          "isPrimary": true,
+          "createdAt": "2024-01-01T00:00:00Z",
+          "updatedAt": "2024-01-01T00:00:00Z"
+        }
+      ]
+    }
+  ],
+  "count": 2
+} 

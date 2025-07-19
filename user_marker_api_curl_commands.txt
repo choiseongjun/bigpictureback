@@ -1,0 +1,177 @@
+# 유저 조회 시 마커 리스트 포함 API curl 명령어
+
+## 1. 유저 조회 (마커 정보 포함)
+curl -X GET http://localhost:8080/api/members/3/with-markers \
+  -H "Content-Type: application/json"
+
+## 2. 유저 조회 (마커 상세 정보 포함)
+curl -X GET http://localhost:8080/api/members/3/with-marker-details \
+  -H "Content-Type: application/json"
+
+## 3. 유저 조회 (마커 통계 포함)
+curl -X GET http://localhost:8080/api/members/3/with-stats \
+  -H "Content-Type: application/json"
+
+## 4. 기존 유저 조회 (마커 정보 없음)
+curl -X GET http://localhost:8080/api/members/3 \
+  -H "Content-Type: application/json"
+
+## 5. 다른 유저 조회 (마커 정보 포함)
+curl -X GET http://localhost:8080/api/members/1/with-markers \
+  -H "Content-Type: application/json"
+
+## 6. 존재하지 않는 유저 조회
+curl -X GET http://localhost:8080/api/members/999/with-markers \
+  -H "Content-Type: application/json"
+
+## 응답 예시:
+
+### 마커 정보 포함 조회 응답:
+```json
+{
+  "success": true,
+  "message": "유저 조회 성공 (마커 정보 포함)",
+  "data": {
+    "member": {
+      "id": 3,
+      "email": "user3@example.com",
+      "nickname": "유저3",
+      "profileImageUrl": null,
+      "region": "서울",
+      "gender": "남성",
+      "age": 25,
+      "personalityType": "ENFP",
+      "isActive": true,
+      "emailVerified": false,
+      "createdAt": "2024-01-01T00:00:00Z",
+      "updatedAt": "2024-01-01T00:00:00Z",
+      "lastLoginAt": null
+    },
+    "markers": [
+      {
+        "id": 1,
+        "member_id": 3,
+        "marker_id": 10,
+        "interaction_type": "liked",
+        "created_at": "2024-01-01T12:00:00Z",
+        "updated_at": "2024-01-01T12:00:00Z"
+      },
+      {
+        "id": 2,
+        "member_id": 3,
+        "marker_id": 15,
+        "interaction_type": "bookmarked",
+        "created_at": "2024-01-01T13:00:00Z",
+        "updated_at": "2024-01-01T13:00:00Z"
+      }
+    ],
+    "marker_count": 2
+  }
+}
+```
+
+### 마커 상세 정보 포함 조회 응답:
+```json
+{
+  "success": true,
+  "message": "유저 조회 성공 (마커 상세 정보 포함)",
+  "data": {
+    "member": {
+      "id": 3,
+      "email": "user3@example.com",
+      "nickname": "유저3",
+      "profileImageUrl": null,
+      "region": "서울",
+      "gender": "남성",
+      "age": 25,
+      "personalityType": "ENFP",
+      "isActive": true,
+      "emailVerified": false,
+      "createdAt": "2024-01-01T00:00:00Z",
+      "updatedAt": "2024-01-01T00:00:00Z",
+      "lastLoginAt": null
+    },
+    "marker_details": [
+      {
+        "interaction": {
+          "id": 1,
+          "member_id": 3,
+          "marker_id": 10,
+          "interaction_type": "liked",
+          "created_at": "2024-01-01T12:00:00Z",
+          "updated_at": "2024-01-01T12:00:00Z"
+        },
+        "marker": {
+          "id": 10,
+          "latitude": 37.5665,
+          "longitude": 126.9780,
+          "emotionTag": "행복",
+          "description": "서울에서의 즐거운 시간",
+          "likes": 5,
+          "dislikes": 0,
+          "views": 20,
+          "author": "익명",
+          "thumbnailImg": "thumbnail_123.webp"
+        }
+      }
+    ],
+    "marker_count": 1
+  }
+}
+```
+
+### 마커 통계 포함 조회 응답:
+```json
+{
+  "success": true,
+  "message": "유저 조회 성공 (마커 통계 포함)",
+  "data": {
+    "member": {
+      "id": 3,
+      "email": "user3@example.com",
+      "nickname": "유저3",
+      "profileImageUrl": null,
+      "region": "서울",
+      "gender": "남성",
+      "age": 25,
+      "personalityType": "ENFP",
+      "isActive": true,
+      "emailVerified": false,
+      "createdAt": "2024-01-01T00:00:00Z",
+      "updatedAt": "2024-01-01T00:00:00Z",
+      "lastLoginAt": null
+    },
+    "marker_stats": {
+      "liked": {
+        "count": 5,
+        "first_interaction": "2024-01-01T10:00:00Z",
+        "last_interaction": "2024-01-01T15:00:00Z"
+      },
+      "bookmarked": {
+        "count": 3,
+        "first_interaction": "2024-01-01T11:00:00Z",
+        "last_interaction": "2024-01-01T14:00:00Z"
+      },
+      "viewed": {
+        "count": 10,
+        "first_interaction": "2024-01-01T09:00:00Z",
+        "last_interaction": "2024-01-01T16:00:00Z"
+      }
+    }
+  }
+}
+```
+
+## API 엔드포인트 설명:
+
+1. **`/api/members/{id}/with-markers`** - 유저 정보 + 마커 상호작용 목록
+2. **`/api/members/{id}/with-marker-details`** - 유저 정보 + 마커 상세 정보 (JOIN)
+3. **`/api/members/{id}/with-stats`** - 유저 정보 + 마커 상호작용 통계
+4. **`/api/members/{id}`** - 기존 유저 정보만 조회
+
+## 사용 시나리오:
+
+- **마커 목록만 필요할 때**: `/with-markers`
+- **마커의 상세 내용도 필요할 때**: `/with-marker-details`
+- **유저의 마커 활동 통계가 필요할 때**: `/with-stats`
+- **유저 정보만 필요할 때**: 기본 `/members/{id}` 
