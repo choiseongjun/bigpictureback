@@ -324,11 +324,14 @@ pub struct MarkersQuery {
     sort_by: Option<String>,
     sort_order: Option<String>,
     limit: Option<i32>,
+    my_markers: Option<bool>, // 추가: 내 마커만 조회
 }
 
 async fn get_markers(
     query: web::Query<MarkersQuery>,
     pool: web::Data<PgPool>,
+    config: web::Data<Config>,
+    req: actix_web::HttpRequest,
 ) -> Result<HttpResponse> {
     info!("🔍 마커 조회 요청 받음:");
     info!("   - lat: {}", query.lat);
@@ -342,6 +345,7 @@ async fn get_markers(
     info!("   - sort_by: {:?}", query.sort_by);
     info!("   - sort_order: {:?}", query.sort_order);
     info!("   - limit: {:?}", query.limit);
+    info!("   - my_markers: {:?}", query.my_markers);
     
     let db = Database { pool: pool.get_ref().clone() };
     
@@ -360,6 +364,20 @@ async fn get_markers(
     let sort_order = query.sort_order.as_deref();
     
     info!("   - 최종 정렬: {} {}", sort_by.unwrap_or("created_at"), sort_order.unwrap_or("desc"));
+
+    // 내 마커만 조회 옵션 처리
+    let mut user_id: Option<i64> = None;
+    if query.my_markers.unwrap_or(false) {
+        // 토큰에서 user_id 추출
+        if let Ok(uid) = extract_user_id_from_token(&req, &config) {
+            user_id = Some(uid);
+        } else {
+            return Ok(HttpResponse::Unauthorized().json(serde_json::json!({
+                "success": false,
+                "message": "내 마커만 조회하려면 로그인(JWT)이 필요합니다."
+            })));
+        }
+    }
     
     match db.get_markers(
         query.lat,
@@ -372,6 +390,7 @@ async fn get_markers(
         sort_by,
         sort_order,
         query.limit,
+        user_id, // 추가: user_id 전달
     ).await {
         Ok(markers) => {
             info!("✅ 마커 조회 성공: {}개 마커 반환", markers.len());

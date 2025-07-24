@@ -728,6 +728,7 @@ impl Database {
         sort_by: Option<&str>,
         sort_order: Option<&str>,
         limit: Option<i32>,
+        user_id: Option<i64>, // 추가: 내 마커만 조회
     ) -> Result<Vec<Marker>> {
         info!("🗄️ 데이터베이스 쿼리 시작:");
         
@@ -760,6 +761,12 @@ impl Database {
              WHERE ST_Within(location::geometry, ST_MakeEnvelope({}, {}, {}, {}, 4326))",
             lng_min, lat_min, lng_max, lat_max
         );
+        
+        // 내 마커만 조회
+        if let Some(uid) = user_id {
+            query.push_str(&format!(" AND member_id = {}", uid));
+            info!("   - 내 마커만 필터: member_id = {}", uid);
+        }
         
         // 감성 태그 필터
         if let Some(tags) = emotion_tags {
