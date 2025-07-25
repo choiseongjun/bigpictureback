@@ -807,6 +807,110 @@ impl Database {
         Ok(markers)
     }
 
+    /// 피드용 마커 조회 (시간순 내림차순, 페이지네이션 지원)
+    pub async fn get_markers_feed(
+        &self,
+        page: i32,
+        limit: i32,
+        emotion_tags: Option<Vec<String>>,
+        min_likes: Option<i32>,
+        min_views: Option<i32>,
+        user_id: Option<i64>,
+    ) -> Result<(Vec<Marker>, i64)> { // (마커 목록, 전체 개수)
+        info!("🗄️ 피드 마커 조회 시작:");
+        info!("   - 페이지: {}, 제한: {}", page, limit);
+        
+        let offset = (page - 1) * limit;
+        
+        let mut where_conditions = Vec::new();
+        let mut params: Vec<String> = Vec::new();
+        let mut param_count = 1;
+        
+        // 특정 사용자 마커만 조회
+        if let Some(uid) = user_id {
+            where_conditions.push(format!("member_id = ${}", param_count));
+            params.push(uid.to_string());
+            param_count += 1;
+            info!("   - 사용자 필터: member_id = {}", uid);
+        }
+        
+        // 감성 태그 필터
+        if let Some(tags) = emotion_tags {
+            if !tags.is_empty() {
+                let tag_conditions: Vec<String> = tags.iter()
+                    .map(|tag| format!("emotion_tag LIKE '%{}%'", tag))
+                    .collect();
+                where_conditions.push(format!("({})", tag_conditions.join(" OR ")));
+                info!("   - 감성 태그 필터: {:?}", tags);
+            }
+        }
+        
+        // 최소 좋아요 수 필터
+        if let Some(min_likes) = min_likes {
+            where_conditions.push(format!("likes >= ${}", param_count));
+            params.push(min_likes.to_string());
+            param_count += 1;
+            info!("   - 최소 좋아요 수: {}", min_likes);
+        }
+        
+        // 최소 조회수 필터
+        if let Some(min_views) = min_views {
+            where_conditions.push(format!("views >= ${}", param_count));
+            params.push(min_views.to_string());
+            param_count += 1;
+            info!("   - 최소 조회수: {}", min_views);
+        }
+        
+        let where_clause = if where_conditions.is_empty() {
+            String::new()
+        } else {
+            format!("WHERE {}", where_conditions.join(" AND "))
+        };
+        
+        // 전체 개수 조회
+        let count_query = format!(
+            "SELECT COUNT(*) as total FROM bigpicture.markers {}",
+            where_clause
+        );
+        
+        let total_count: i64 = if params.is_empty() {
+            sqlx::query_scalar(&count_query)
+                .fetch_one(&self.pool)
+                .await?
+        } else {
+            let mut query_builder = sqlx::query_scalar(&count_query);
+            for param in &params {
+                query_builder = query_builder.bind(param);
+            }
+            query_builder.fetch_one(&self.pool).await?
+        };
+        
+        // 마커 목록 조회
+        let markers_query = format!(
+            "SELECT id, member_id, ST_AsText(location) as location, emotion_tag, description, likes, dislikes, views, author, thumbnail_img, created_at, updated_at
+             FROM bigpicture.markers 
+             {} 
+             ORDER BY created_at DESC 
+             LIMIT {} OFFSET {}",
+            where_clause, limit, offset
+        );
+        
+        let markers = if params.is_empty() {
+            sqlx::query_as::<_, Marker>(&markers_query)
+                .fetch_all(&self.pool)
+                .await?
+        } else {
+            let mut query_builder = sqlx::query_as::<_, Marker>(&markers_query);
+            for param in &params {
+                query_builder = query_builder.bind(param);
+            }
+            query_builder.fetch_all(&self.pool).await?
+        };
+        
+        info!("✅ 피드 쿼리 완료: {}개 마커 반환 (전체: {}개)", markers.len(), total_count);
+        Ok((markers, total_count))
+    }
+
     // 마커 이미지 관련 함수들
     pub async fn add_marker_image(
         &self,

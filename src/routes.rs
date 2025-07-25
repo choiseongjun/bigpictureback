@@ -236,6 +236,7 @@ pub fn setup_routes(config: &mut web::ServiceConfig) {
                 .route("/markers", web::post().to(
                     |db, payload, config, req| create_marker(db, payload, config, req)
                 ))
+                .route("/markers/feed", web::get().to(get_markers_feed))
                 .route("/markers/{id}", web::get().to(get_marker_detail))
                 .route("/markers/{id}/like", web::post().to(toggle_marker_like))
                 .route("/markers/{id}/dislike", web::post().to(toggle_marker_dislike))
@@ -325,6 +326,16 @@ pub struct MarkersQuery {
     sort_order: Option<String>,
     limit: Option<i32>,
     my_markers: Option<bool>, // 추가: 내 마커만 조회
+}
+
+#[derive(Deserialize)]
+pub struct MarkersFeedQuery {
+    page: Option<i32>,
+    limit: Option<i32>,
+    emotion_tags: Option<String>,
+    min_likes: Option<i32>,
+    min_views: Option<i32>,
+    user_id: Option<i64>, // 특정 사용자의 마커만 조회
 }
 
 async fn get_markers(
@@ -2807,6 +2818,107 @@ async fn get_member_with_stats(
             Ok(HttpResponse::InternalServerError().json(serde_json::json!({
                 "success": false,
                 "message": format!("유저 조회 실패: {}", e)
+            })))
+        }
+    }
+}
+
+/// 피드용 마커 조회 (시간순 내림차순)
+async fn get_markers_feed(
+    query: web::Query<MarkersFeedQuery>,
+    pool: web::Data<PgPool>,
+    config: web::Data<Config>,
+) -> Result<HttpResponse> {
+    let page = query.page.unwrap_or(1);
+    let limit = query.limit.unwrap_or(20);
+    
+    info!("📱 피드 마커 조회 요청:");
+    info!("   - 페이지: {}", page);
+    info!("   - 제한: {}", limit);
+    info!("   - 감성 태그: {:?}", query.emotion_tags);
+    info!("   - 최소 좋아요: {:?}", query.min_likes);
+    info!("   - 최소 조회수: {:?}", query.min_views);
+    info!("   - 사용자 ID: {:?}", query.user_id);
+    
+    let db = Database { pool: pool.get_ref().clone() };
+    
+    // 감성 태그 파싱
+    let emotion_tags = query.emotion_tags.as_ref().map(|tags| {
+        let parsed_tags: Vec<String> = tags.split(',')
+            .map(|tag| tag.trim().to_string())
+            .filter(|tag| !tag.is_empty())
+            .collect();
+        parsed_tags
+    });
+    
+    match db.get_markers_feed(
+        page,
+        limit,
+        emotion_tags,
+        query.min_likes,
+        query.min_views,
+        query.user_id,
+    ).await {
+        Ok((markers, total_count)) => {
+            info!("✅ 피드 마커 조회 성공: {}개 마커 반환 (전체: {}개)", markers.len(), total_count);
+            
+            // 각 마커에 이미지 정보 추가
+            let mut formatted_markers = Vec::new();
+            for marker in &markers {
+                // 마커 이미지 조회
+                let images = match db.get_marker_images(marker.id).await {
+                    Ok(images) => images,
+                    Err(e) => {
+                        warn!("⚠️ 마커 {} 이미지 조회 실패: {}", marker.id, e);
+                        vec![]
+                    }
+                };
+                
+                let formatted_images: Vec<serde_json::Value> = images.iter()
+                    .map(|image| serde_json::json!({
+                        "id": image.id,
+                        "markerId": image.marker_id,
+                        "imageType": image.image_type,
+                        "imageUrl": image.image_url,
+                        "imageOrder": image.image_order,
+                        "isPrimary": image.is_primary,
+                        "createdAt": image.created_at,
+                        "updatedAt": image.updated_at
+                    }))
+                    .collect();
+                
+                let mut marker_data = marker_to_camelcase_json(marker);
+                if let Some(marker_obj) = marker_data.as_object_mut() {
+                    marker_obj.insert("images".to_string(), serde_json::Value::Array(formatted_images));
+                }
+                
+                formatted_markers.push(marker_data);
+            }
+            
+            // 페이지네이션 정보 계산
+            let total_pages = (total_count as f64 / limit as f64).ceil() as i32;
+            let has_next = page < total_pages;
+            let has_prev = page > 1;
+            
+            Ok(HttpResponse::Ok().json(serde_json::json!({
+                "success": true,
+                "data": formatted_markers,
+                "pagination": {
+                    "currentPage": page,
+                    "totalPages": total_pages,
+                    "totalCount": total_count,
+                    "limit": limit,
+                    "hasNext": has_next,
+                    "hasPrev": has_prev
+                },
+                "count": markers.len()
+            })))
+        }
+        Err(e) => {
+            error!("❌ 피드 마커 조회 실패: {}", e);
+            Ok(HttpResponse::InternalServerError().json(serde_json::json!({
+                "success": false,
+                "message": format!("피드 마커 조회 실패: {}", e)
             })))
         }
     }

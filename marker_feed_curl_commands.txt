@@ -1,0 +1,138 @@
+# 마커 피드 API 테스트 명령어
+# 시간순 내림차순으로 마커를 조회하는 피드용 API
+
+## 1. 기본 피드 조회 (최신 마커 20개)
+# GET /api/markers/feed
+curl -X GET "http://localhost:8000/api/markers/feed" \
+  -H "Content-Type: application/json"
+
+## 2. 페이지네이션을 사용한 피드 조회
+# GET /api/markers/feed?page=1&limit=10
+curl -X GET "http://localhost:8000/api/markers/feed?page=1&limit=10" \
+  -H "Content-Type: application/json"
+
+# 두 번째 페이지 조회
+curl -X GET "http://localhost:8000/api/markers/feed?page=2&limit=10" \
+  -H "Content-Type: application/json"
+
+## 3. 감성 태그로 필터링된 피드 조회
+# GET /api/markers/feed?emotion_tags=행복,기쁨
+curl -X GET "http://localhost:8000/api/markers/feed?emotion_tags=행복,기쁨" \
+  -H "Content-Type: application/json"
+
+# 단일 감성 태그
+curl -X GET "http://localhost:8000/api/markers/feed?emotion_tags=😊" \
+  -H "Content-Type: application/json"
+
+## 4. 최소 좋아요 수로 필터링
+# GET /api/markers/feed?min_likes=5
+curl -X GET "http://localhost:8000/api/markers/feed?min_likes=5" \
+  -H "Content-Type: application/json"
+
+## 5. 최소 조회수로 필터링
+# GET /api/markers/feed?min_views=10
+curl -X GET "http://localhost:8000/api/markers/feed?min_views=10" \
+  -H "Content-Type: application/json"
+
+## 6. 특정 사용자의 마커만 조회
+# GET /api/markers/feed?user_id=1
+curl -X GET "http://localhost:8000/api/markers/feed?user_id=1" \
+  -H "Content-Type: application/json"
+
+## 7. 복합 조건으로 필터링
+# GET /api/markers/feed?page=1&limit=15&emotion_tags=행복&min_likes=3&min_views=5
+curl -X GET "http://localhost:8000/api/markers/feed?page=1&limit=15&emotion_tags=행복&min_likes=3&min_views=5" \
+  -H "Content-Type: application/json"
+
+## 8. 특정 사용자의 인기 마커 조회
+# GET /api/markers/feed?user_id=1&min_likes=10&limit=20
+curl -X GET "http://localhost:8000/api/markers/feed?user_id=1&min_likes=10&limit=20" \
+  -H "Content-Type: application/json"
+
+## 9. 특정 감성의 인기 마커 조회
+# GET /api/markers/feed?emotion_tags=😍&min_likes=20&min_views=50&limit=30
+curl -X GET "http://localhost:8000/api/markers/feed?emotion_tags=😍&min_likes=20&min_views=50&limit=30" \
+  -H "Content-Type: application/json"
+
+## 10. 전체 마커 개수 확인 (limit=1로 빠른 확인)
+# GET /api/markers/feed?limit=1
+curl -X GET "http://localhost:8000/api/markers/feed?limit=1" \
+  -H "Content-Type: application/json"
+
+## 응답 예시
+
+### 성공 응답
+{
+  "success": true,
+  "data": [
+    {
+      "id": 1,
+      "memberId": 1,
+      "latitude": 37.5665,
+      "longitude": 126.9780,
+      "emotionTag": "😊",
+      "description": "서울에서 행복한 순간",
+      "likes": 15,
+      "dislikes": 2,
+      "views": 120,
+      "author": "사용자명",
+      "thumbnailImg": "https://example.com/thumbnail.jpg",
+      "createdAt": "2024-01-15T10:30:00Z",
+      "updatedAt": "2024-01-15T10:30:00Z",
+      "images": [
+        {
+          "id": 1,
+          "markerId": 1,
+          "imageType": "thumbnail",
+          "imageUrl": "https://example.com/image1.jpg",
+          "imageOrder": 0,
+          "isPrimary": true,
+          "createdAt": "2024-01-15T10:30:00Z",
+          "updatedAt": "2024-01-15T10:30:00Z"
+        },
+        {
+          "id": 2,
+          "markerId": 1,
+          "imageType": "gallery",
+          "imageUrl": "https://example.com/image2.jpg",
+          "imageOrder": 1,
+          "isPrimary": false,
+          "createdAt": "2024-01-15T10:30:00Z",
+          "updatedAt": "2024-01-15T10:30:00Z"
+        }
+      ]
+    }
+  ],
+  "pagination": {
+    "currentPage": 1,
+    "totalPages": 5,
+    "totalCount": 100,
+    "limit": 20,
+    "hasNext": true,
+    "hasPrev": false
+  },
+  "count": 20
+}
+
+### 에러 응답
+{
+  "success": false,
+  "message": "피드 마커 조회 실패: 데이터베이스 오류"
+}
+
+## 쿼리 파라미터 설명
+
+- `page`: 페이지 번호 (기본값: 1)
+- `limit`: 페이지당 마커 개수 (기본값: 20, 최대: 100)
+- `emotion_tags`: 감성 태그 필터 (쉼표로 구분)
+- `min_likes`: 최소 좋아요 수
+- `min_views`: 최소 조회수
+- `user_id`: 특정 사용자의 마커만 조회
+
+## 특징
+
+1. **시간순 정렬**: 최신 마커가 먼저 나옴 (created_at DESC)
+2. **페이지네이션**: 대량의 마커를 효율적으로 조회
+3. **이미지 포함**: 각 마커의 모든 이미지 정보 포함
+4. **필터링**: 감성 태그, 좋아요 수, 조회수, 사용자별 필터링
+5. **메타데이터**: 전체 개수, 페이지 정보 등 포함 
