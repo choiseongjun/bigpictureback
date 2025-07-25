@@ -1984,7 +1984,82 @@ impl Database {
         } else {
             9  // 매우 줌인에서 최대 세밀한 클러스터링 (개별 마커 사진 많이 보임)
         };
-
+        // precision이 9 이상이거나 lat_delta/lng_delta가 아주 작으면 클러스터링 없이 개별 마커로 분리
+        if precision >= 9 || (lat_delta < 0.01 && lng_delta < 0.01) {
+            let all_marker_ids: Vec<i32> = marker_infos.iter().map(|m| m.id).collect();
+            use futures::stream::{FuturesUnordered, StreamExt};
+            let image_futures: FuturesUnordered<_> = all_marker_ids.iter()
+                .map(|&marker_id| {
+                    let db = &self.pool;
+                    async move {
+                        let rows = sqlx::query(
+                            r#"
+                            SELECT id, marker_id, image_type, image_url, image_order, is_primary, created_at, updated_at
+                            FROM bigpicture.marker_images 
+                            WHERE marker_id = $1
+                            ORDER BY image_order ASC
+                            "#
+                        )
+                        .bind(marker_id)
+                        .fetch_all(db)
+                        .await
+                        .unwrap_or_default();
+                        let images: Vec<MarkerImage> = rows.iter().map(|row| MarkerImage {
+                            id: row.try_get("id").unwrap_or(0),
+                            marker_id: row.try_get("marker_id").unwrap_or(0),
+                            image_type: row.try_get("image_type").unwrap_or_default(),
+                            image_url: row.try_get("image_url").unwrap_or_default(),
+                            image_order: row.try_get("image_order").unwrap_or(0),
+                            is_primary: row.try_get("is_primary").unwrap_or(false),
+                            created_at: row.try_get("created_at").unwrap_or_else(|_| chrono::Utc::now()),
+                            updated_at: row.try_get("updated_at").unwrap_or_else(|_| chrono::Utc::now()),
+                        }).collect();
+                        (marker_id, images)
+                    }
+                })
+                .collect();
+            let marker_images_map: std::collections::HashMap<i32, Vec<MarkerImage>> = 
+                image_futures.collect::<Vec<_>>().await.into_iter().collect();
+            let mut result = Vec::new();
+            for m in marker_infos {
+                let empty_vec = Vec::new();
+                let images = marker_images_map.get(&m.id).unwrap_or(&empty_vec);
+                let images_json: Vec<serde_json::Value> = images.iter().map(|img| serde_json::json!({
+                    "id": img.id,
+                    "markerId": img.marker_id,
+                    "imageType": img.image_type,
+                    "imageUrl": img.image_url,
+                    "imageOrder": img.image_order,
+                    "isPrimary": img.is_primary,
+                    "createdAt": img.created_at,
+                    "updatedAt": img.updated_at
+                })).collect();
+                result.push(serde_json::json!({
+                    "h3_index": null,
+                    "lat": m.latitude,
+                    "lng": m.longitude,
+                    "count": 1,
+                    "marker_ids": [m.id],
+                    "markers": [serde_json::json!({
+                        "id": m.id,
+                        "memberId": m.member_id,
+                        "latitude": m.latitude,
+                        "longitude": m.longitude,
+                        "emotionTag": m.emotion_tag,
+                        "description": m.description,
+                        "likes": m.likes,
+                        "dislikes": m.dislikes,
+                        "views": m.views,
+                        "author": m.author,
+                        "thumbnailImg": m.thumbnail_img,
+                        "createdAt": m.created_at.to_rfc3339(),
+                        "updatedAt": m.updated_at.to_rfc3339(),
+                        "images": images_json
+                    })]
+                }));
+            }
+            return Ok(result);
+        }
         use std::collections::HashMap;
         let mut clusters: HashMap<u64, Vec<MarkerClusterInfo>> = HashMap::new();
         for marker in marker_infos {
