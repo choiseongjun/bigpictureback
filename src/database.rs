@@ -759,22 +759,10 @@ impl Database {
         
         info!("   - 검색 범위: lat({} ~ {}), lng({} ~ {})", lat_min, lat_max, lng_min, lng_max);
         
-        // 정렬
-        let sort_column = match sort_by {
-            Some("likes") => "likes",
-            Some("views") => "views",
-            Some("created_at") => "created_at",
-            _ => "created_at", // 기본값
-        };
-        
-        let sort_direction = match sort_order {
-            Some("asc") => "ASC",
-            Some("desc") => "DESC",
-            _ => "DESC", // 기본값
-        };
-        
-        info!("   - 정렬: {} {}", sort_column, sort_direction);
-        
+        // 정렬 동적 처리
+        let allowed_sort = ["created_at", "likes", "views", "dislikes"];
+        let sort_col = sort_by.filter(|s| allowed_sort.contains(&s.to_lowercase().as_str())).unwrap_or("created_at");
+        let order = sort_order.filter(|o| o.eq_ignore_ascii_case("asc") || o.eq_ignore_ascii_case("desc")).unwrap_or("desc");
         let mut query = format!(
             "SELECT id, member_id, ST_AsText(location) as location, emotion_tag, description, likes, dislikes, views, author, thumbnail_img, created_at, updated_at
              FROM bigpicture.markers 
@@ -809,7 +797,7 @@ impl Database {
             info!("   - 최소 조회수: {}", views);
         }
         
-        query.push_str(&format!(" ORDER BY {} {}", sort_column, sort_direction));
+        query.push_str(&format!(" ORDER BY {} {}", sort_col, order));
         
         // LIMIT 추가 (기본값 1000개)
         let limit_value = limit.unwrap_or(5000);
@@ -2104,6 +2092,70 @@ impl Database {
             }).collect()
         }).await?;
         Ok(result)
+    }
+
+    pub async fn get_markers_rank(
+        &self,
+        _lat: f64,
+        _lng: f64,
+        _lat_delta: f64,
+        _lng_delta: f64,
+        emotion_tags: Option<Vec<String>>,
+        min_likes: Option<i32>,
+        min_views: Option<i32>,
+        sort_by: Option<&str>,
+        sort_order: Option<&str>,
+        limit: Option<i32>,
+        user_id: Option<i64>,
+    ) -> Result<Vec<Marker>> {
+        let mut query = String::from(
+            "SELECT id, member_id, location, emotion_tag, description, likes, dislikes, views, author, thumbnail_img, created_at, updated_at
+             FROM bigpicture.markers WHERE 1=1"
+        );
+        if let Some(tags) = &emotion_tags {
+            if !tags.is_empty() {
+                let tags_str = tags.iter().map(|tag| format!("'{}'", tag)).collect::<Vec<_>>().join(",");
+                query.push_str(&format!(" AND emotion_tag IN ({})", tags_str));
+            }
+        }
+        if let Some(likes) = min_likes {
+            query.push_str(&format!(" AND likes >= {}", likes));
+        }
+        if let Some(views) = min_views {
+            query.push_str(&format!(" AND views >= {}", views));
+        }
+        if let Some(uid) = user_id {
+            query.push_str(&format!(" AND member_id = {}", uid));
+        }
+        let allowed_sort = ["created_at", "likes", "views", "dislikes"];
+        let sort_col = sort_by.filter(|s| allowed_sort.contains(&s.to_lowercase().as_str())).unwrap_or("likes");
+        let order = sort_order.filter(|o| o.eq_ignore_ascii_case("asc") || o.eq_ignore_ascii_case("desc")).unwrap_or("desc");
+        query.push_str(&format!(" ORDER BY {} {}", sort_col, order));
+        let limit_value = limit.unwrap_or(20);
+        query.push_str(&format!(" LIMIT {}", limit_value));
+
+        let rows = sqlx::query(&query)
+            .fetch_all(&self.pool)
+            .await?;
+
+        let mut markers = Vec::new();
+        for row in rows {
+            markers.push(Marker {
+                id: row.try_get("id").unwrap_or(0),
+                member_id: row.try_get("member_id").ok(),
+                location: row.try_get("location").ok(),
+                emotion_tag: row.try_get("emotion_tag").ok(),
+                description: row.try_get("description").ok(),
+                likes: row.try_get("likes").unwrap_or(0),
+                dislikes: row.try_get("dislikes").unwrap_or(0),
+                views: row.try_get("views").unwrap_or(0),
+                author: row.try_get("author").ok(),
+                thumbnail_img: row.try_get("thumbnail_img").ok(),
+                created_at: row.try_get("created_at").unwrap_or_else(|_| chrono::Utc::now()),
+                updated_at: row.try_get("updated_at").unwrap_or_else(|_| chrono::Utc::now()),
+            });
+        }
+        Ok(markers)
     }
 }
 

@@ -238,6 +238,7 @@ pub fn setup_routes(config: &mut web::ServiceConfig) {
                 ))
                 .route("/markers/feed", web::get().to(get_markers_feed))
                 .route("/markers/cluster", web::get().to(get_markers_cluster))
+                .route("/markers/rank", web::get().to(get_markers_rank))
                 .route("/markers/{id}", web::get().to(get_marker_detail))
                 .route("/markers/{id}/like", web::post().to(toggle_marker_like))
                 .route("/markers/{id}/dislike", web::post().to(toggle_marker_dislike))
@@ -2994,5 +2995,102 @@ async fn get_markers_cluster(
             "success": false,
             "message": format!("마커 클러스터 조회 실패: {}", e)
         }))),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct RankMarkersQuery {
+    pub limit: Option<i32>,
+    pub sort_by: Option<String>,
+    pub sort_order: Option<String>,
+    pub emotion_tags: Option<String>,
+    pub min_likes: Option<i32>,
+    pub min_views: Option<i32>,
+    pub my: Option<bool>,
+}
+
+async fn get_markers_rank(
+    query: web::Query<RankMarkersQuery>,
+    pool: web::Data<PgPool>,
+    config: web::Data<Config>,
+    req: actix_web::HttpRequest,
+) -> Result<HttpResponse> {
+    info!("🏆 마커 순위 조회 요청:");
+    info!("   - 제한: {:?}", query.limit);
+    info!("   - 정렬 기준: {:?}", query.sort_by);
+    info!("   - 정렬 순서: {:?}", query.sort_order);
+    info!("   - 감성 태그: {:?}", query.emotion_tags);
+    info!("   - 최소 좋아요: {:?}", query.min_likes);
+    info!("   - 최소 조회수: {:?}", query.min_views);
+    info!("   - 내 마커 포함: {:?}", query.my);
+    let db = Database { pool: pool.get_ref().clone() };
+    let emotion_tags = query.emotion_tags.as_ref().map(|tags| {
+        tags.split(',').map(|tag| tag.trim().to_string()).filter(|tag| !tag.is_empty()).collect::<Vec<_>>()
+    });
+    let sort_by = query.sort_by.as_deref();
+    let sort_order = query.sort_order.as_deref();
+    let mut user_id: Option<i64> = None;
+    if query.my.unwrap_or(false) {
+        if let Ok(uid) = extract_user_id_from_token(&req, &config) {
+            user_id = Some(uid);
+        } else {
+            return Ok(HttpResponse::Unauthorized().json(serde_json::json!({
+                "success": false,
+                "message": "내 마커만 조회하려면 로그인(JWT)이 필요합니다."
+            })));
+        }
+    }
+    match db.get_markers_rank(
+        0.0, 0.0, 0.0, 0.0, // 좌표는 랭킹에 필요없으므로 더미값
+        emotion_tags,
+        query.min_likes,
+        query.min_views,
+        sort_by,
+        sort_order,
+        query.limit,
+        user_id,
+    ).await {
+        Ok(markers) => {
+            info!("✅ 마커 순위 조회 성공: {}개 마커 반환", markers.len());
+            let mut formatted_markers = Vec::new();
+            for marker in &markers {
+                let images = match db.get_marker_images(marker.id).await {
+                    Ok(images) => images,
+                    Err(e) => {
+                        warn!("⚠️ 마커 {} 이미지 조회 실패: {}", marker.id, e);
+                        vec![]
+                    }
+                };
+                let formatted_images: Vec<serde_json::Value> = images.iter()
+                    .map(|image| serde_json::json!({
+                        "id": image.id,
+                        "markerId": image.marker_id,
+                        "imageType": image.image_type,
+                        "imageUrl": image.image_url,
+                        "imageOrder": image.image_order,
+                        "isPrimary": image.is_primary,
+                        "createdAt": image.created_at,
+                        "updatedAt": image.updated_at
+                    }))
+                    .collect();
+                let mut marker_data = marker_to_camelcase_json(marker);
+                if let Some(marker_obj) = marker_data.as_object_mut() {
+                    marker_obj.insert("images".to_string(), serde_json::Value::Array(formatted_images));
+                }
+                formatted_markers.push(marker_data);
+            }
+            Ok(HttpResponse::Ok().json(serde_json::json!({
+                "success": true,
+                "data": formatted_markers,
+                "count": markers.len()
+            })))
+        }
+        Err(e) => {
+            error!("❌ 마커 순위 조회 실패: {}", e);
+            Ok(HttpResponse::InternalServerError().json(serde_json::json!({
+                "success": false,
+                "message": format!("마커 순위 조회 실패: {}", e)
+            })))
+        }
     }
 }
