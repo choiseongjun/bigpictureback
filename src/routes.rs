@@ -326,7 +326,7 @@ pub struct MarkersQuery {
     sort_by: Option<String>,
     sort_order: Option<String>,
     limit: Option<i32>,
-    my_markers: Option<bool>, // 추가: 내 마커만 조회
+    my: Option<bool>, // 추가: 내 마커만 표시 (기본 false)
 }
 
 #[derive(Deserialize)]
@@ -357,7 +357,7 @@ async fn get_markers(
     info!("   - sort_by: {:?}", query.sort_by);
     info!("   - sort_order: {:?}", query.sort_order);
     info!("   - limit: {:?}", query.limit);
-    info!("   - my_markers: {:?}", query.my_markers);
+    info!("   - my: {:?}", query.my);
     
     let db = Database { pool: pool.get_ref().clone() };
     
@@ -379,7 +379,7 @@ async fn get_markers(
 
     // 내 마커만 조회 옵션 처리
     let mut user_id: Option<i64> = None;
-    if query.my_markers.unwrap_or(false) {
+    if query.my.unwrap_or(false) {
         // 토큰에서 user_id 추출
         if let Ok(uid) = extract_user_id_from_token(&req, &config) {
             user_id = Some(uid);
@@ -2930,6 +2930,7 @@ async fn get_markers_cluster(
     query: web::Query<MarkersQuery>,
     pool: web::Data<PgPool>,
     config: web::Data<Config>,
+    req: actix_web::HttpRequest,
 ) -> Result<HttpResponse> {
     let db = Database { pool: pool.get_ref().clone() };
     // 파라미터 파싱
@@ -2938,17 +2939,57 @@ async fn get_markers_cluster(
     });
     let sort_by = query.sort_by.as_deref();
     let sort_order = query.sort_order.as_deref();
-    let user_id = None; // JWT에서 추출하려면 여기서 처리
+    let mut user_id = None;
+    if query.my.unwrap_or(false) {
+        if let Ok(uid) = extract_user_id_from_token(&req, &config) {
+            user_id = Some(uid);
+        } else {
+            return Ok(HttpResponse::Unauthorized().json(serde_json::json!({
+                "success": false,
+                "message": "내 마커만 표시하려면 로그인(JWT)이 필요합니다."
+            })));
+        }
+    }
     match db.get_markers_cluster(
         query.lat, query.lng, query.lat_delta, query.lng_delta,
         emotion_tags, query.min_likes, query.min_views,
         sort_by, sort_order, query.limit, user_id
     ).await {
-        Ok(clusters) => Ok(HttpResponse::Ok().json(serde_json::json!({
-            "success": true,
-            "data": clusters,
-            "count": clusters.len()
-        }))),
+        Ok(mut clusters) => {
+            // user_id가 있으면 각 마커에 isMine 추가
+            if let Some(uid) = user_id {
+                for cluster in clusters.iter_mut() {
+                    if let Some(markers) = cluster.get_mut("markers") {
+                        if let Some(arr) = markers.as_array_mut() {
+                            for marker in arr.iter_mut() {
+                                if let Some(obj) = marker.as_object_mut() {
+                                    let is_mine = obj.get("memberId").and_then(|v| v.as_i64()).map(|mid| mid == uid).unwrap_or(false);
+                                    obj.insert("isMine".to_string(), serde_json::json!(is_mine));
+                                }
+                            }
+                        }
+                    }
+                }
+            } else {
+                // user_id 없으면 모두 false
+                for cluster in clusters.iter_mut() {
+                    if let Some(markers) = cluster.get_mut("markers") {
+                        if let Some(arr) = markers.as_array_mut() {
+                            for marker in arr.iter_mut() {
+                                if let Some(obj) = marker.as_object_mut() {
+                                    obj.insert("isMine".to_string(), serde_json::json!(false));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(HttpResponse::Ok().json(serde_json::json!({
+                "success": true,
+                "data": clusters,
+                "count": clusters.len()
+            })))
+        },
         Err(e) => Ok(HttpResponse::InternalServerError().json(serde_json::json!({
             "success": false,
             "message": format!("마커 클러스터 조회 실패: {}", e)
