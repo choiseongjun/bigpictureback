@@ -3,6 +3,26 @@ use sqlx::postgres::PgPoolOptions;
 use anyhow::Result;
 use crate::config::Config;
 use log::{info, warn, error};
+use h3ron::H3Cell;
+use h3ron::Index;
+use geo_types::Point;
+use rayon::prelude::*;
+
+struct MarkerClusterInfo {
+    id: i32,
+    member_id: i64,
+    latitude: f64,
+    longitude: f64,
+    emotion_tag: String,
+    description: String,
+    likes: i32,
+    dislikes: i32,
+    views: i32,
+    author: String,
+    thumbnail_img: String,
+    created_at: chrono::DateTime<chrono::Utc>,
+    updated_at: chrono::DateTime<chrono::Utc>,
+}
 
 #[derive(Clone)]
 pub struct Database {
@@ -1887,6 +1907,146 @@ impl Database {
         }
         
         Ok(serde_json::Value::Object(result))
+    }
+
+    pub async fn get_markers_cluster(
+        &self,
+        lat: f64,
+        lng: f64,
+        lat_delta: f64,
+        lng_delta: f64,
+        emotion_tags: Option<Vec<String>>,
+        min_likes: Option<i32>,
+        min_views: Option<i32>,
+        sort_by: Option<&str>,
+        sort_order: Option<&str>,
+        limit: Option<i32>,
+        user_id: Option<i64>,
+    ) -> Result<Vec<serde_json::Value>> {
+        // 현재 화면보다 약간 더 넓은 영역을 조회해서 지도 이동 시 미리 로딩
+        let buffer_factor = 1.2; // 20% 더 넓은 영역 조회
+        let lat_min = lat - (lat_delta / 2.0) * buffer_factor;
+        let lat_max = lat + (lat_delta / 2.0) * buffer_factor;
+        let lng_min = lng - (lng_delta / 2.0) * buffer_factor;
+        let lng_max = lng + (lng_delta / 2.0) * buffer_factor;
+
+        let mut query = format!(
+            "SELECT m.id, m.member_id, ST_Y(m.location::geometry) as latitude, ST_X(m.location::geometry) as longitude, 
+                    m.emotion_tag, m.description, m.likes, m.dislikes, m.views, m.author, m.thumbnail_img, 
+                    m.created_at, m.updated_at
+             FROM bigpicture.markers m
+             WHERE ST_Within(m.location::geometry, ST_MakeEnvelope({}, {}, {}, {}, 4326))",
+            lng_min, lat_min, lng_max, lat_max
+        );
+        if let Some(uid) = user_id {
+            query.push_str(&format!(" AND member_id = {}", uid));
+        }
+        if let Some(tags) = &emotion_tags {
+            if !tags.is_empty() {
+                let tags_str = tags.iter().map(|tag| format!("'{}'", tag)).collect::<Vec<_>>().join(",");
+                query.push_str(&format!(" AND emotion_tag IN ({})", tags_str));
+            }
+        }
+        if let Some(likes) = min_likes {
+            query.push_str(&format!(" AND likes >= {}", likes));
+        }
+        if let Some(views) = min_views {
+            query.push_str(&format!(" AND views >= {}", views));
+        }
+        query.push_str(" ORDER BY created_at DESC");
+        let limit_value = limit.unwrap_or(1000);
+        query.push_str(&format!(" LIMIT {}", limit_value));
+
+        let rows = sqlx::query(
+            &query
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        // PgRow -> MarkerClusterInfo 변환
+        let mut marker_infos = Vec::new();
+        for row in rows {
+            marker_infos.push(MarkerClusterInfo {
+                id: row.try_get("id").unwrap_or(0),
+                member_id: row.try_get("member_id").unwrap_or(0),
+                latitude: row.try_get("latitude").unwrap_or(0.0),
+                longitude: row.try_get("longitude").unwrap_or(0.0),
+                emotion_tag: row.try_get("emotion_tag").unwrap_or_default(),
+                description: row.try_get("description").unwrap_or_default(),
+                likes: row.try_get("likes").unwrap_or(0),
+                dislikes: row.try_get("dislikes").unwrap_or(0),
+                views: row.try_get("views").unwrap_or(0),
+                author: row.try_get("author").unwrap_or_default(),
+                thumbnail_img: row.try_get("thumbnail_img").unwrap_or_default(),
+                created_at: row.try_get("created_at").unwrap_or_else(|_| chrono::Utc::now()),
+                updated_at: row.try_get("updated_at").unwrap_or_else(|_| chrono::Utc::now()),
+            });
+        }
+
+        // 줌 레벨에 따른 클러스터링 조정
+        // 줌 레벨 15 이상에서는 클러스터링을 최소화해서 개별 마커 사진이 많이 보이도록
+        let precision = if lat_delta > 2.0 || lng_delta > 2.0 {
+            3  // 매우 큰 클러스터 (줌아웃)
+        } else if lat_delta > 0.5 || lng_delta > 0.5 {
+            4  // 중간 줌에서 적절한 클러스터링
+        } else if lat_delta > 0.1 || lng_delta > 0.1 {
+            5  // 줌 레벨 14에서 적절한 클러스터링
+        } else if lat_delta > 0.03 || lng_delta > 0.03 {
+            8  // 줌 레벨 15 이상에서 매우 세밀한 클러스터링 (개별 마커 많이 보임)
+        } else {
+            9  // 매우 줌인에서 최대 세밀한 클러스터링 (개별 마커 사진 많이 보임)
+        };
+
+        use std::collections::HashMap;
+        let mut clusters: HashMap<u64, Vec<MarkerClusterInfo>> = HashMap::new();
+        for marker in marker_infos {
+            let h3 = H3Cell::from_point(Point::new(marker.longitude, marker.latitude), precision).unwrap();
+            let h3idx = h3.h3index();
+            clusters.entry(h3idx).or_default().push(marker);
+        }
+
+        // 병렬 처리를 위한 클러스터 데이터 준비
+        let cluster_data: Vec<_> = clusters.into_iter().collect();
+        
+        // 병렬로 클러스터 처리
+        let result: Vec<serde_json::Value> = tokio::task::spawn_blocking(move || {
+            cluster_data.into_par_iter().map(|(h3idx, marker_list)| {
+                let count = marker_list.len();
+                let (sum_lat, sum_lng) = marker_list.iter().fold((0.0, 0.0), |acc, m| (acc.0 + m.latitude, acc.1 + m.longitude));
+                let center_lat = sum_lat / count as f64;
+                let center_lng = sum_lng / count as f64;
+                let marker_ids: Vec<i32> = marker_list.iter().map(|m| m.id).collect();
+
+                // 병렬로 마커 JSON 변환
+                let markers: Vec<serde_json::Value> = marker_list.par_iter().map(|m| {
+                    serde_json::json!({
+                        "id": m.id,
+                        "memberId": m.member_id,
+                        "latitude": m.latitude,
+                        "longitude": m.longitude,
+                        "emotionTag": m.emotion_tag,
+                        "description": m.description,
+                        "likes": m.likes,
+                        "dislikes": m.dislikes,
+                        "views": m.views,
+                        "author": m.author,
+                        "thumbnailImg": m.thumbnail_img,
+                        "createdAt": m.created_at.to_rfc3339(),
+                        "updatedAt": m.updated_at.to_rfc3339()
+                    })
+                }).collect();
+
+                serde_json::json!({
+                    "h3_index": format!("{:x}", h3idx),
+                    "lat": center_lat,
+                    "lng": center_lng,
+                    "count": count,
+                    "marker_ids": marker_ids,
+                    "markers": markers
+                })
+            }).collect()
+        }).await?;
+        Ok(result)
     }
 }
 

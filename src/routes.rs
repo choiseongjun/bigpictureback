@@ -237,16 +237,17 @@ pub fn setup_routes(config: &mut web::ServiceConfig) {
                     |db, payload, config, req| create_marker(db, payload, config, req)
                 ))
                 .route("/markers/feed", web::get().to(get_markers_feed))
+                .route("/markers/cluster", web::get().to(get_markers_cluster))
                 .route("/markers/{id}", web::get().to(get_marker_detail))
                 .route("/markers/{id}/like", web::post().to(toggle_marker_like))
                 .route("/markers/{id}/dislike", web::post().to(toggle_marker_dislike))
-                            .route("/markers/{id}/bookmark", web::post().to(toggle_marker_bookmark))
-            .route("/markers/{id}/view", web::post().to(add_marker_view))
-            .route("/markers/{id}/images", web::get().to(get_marker_images))
-            .route("/markers/{id}/images", web::post().to(add_marker_image))
-            .route("/markers/{id}/images/{image_id}", web::delete().to(delete_marker_image))
-            .route("/markers/{id}/images/{image_id}/primary", web::put().to(set_marker_primary_image))
-            .route("/markers/{id}/images/{image_id}/order", web::put().to(update_marker_image_order))
+                .route("/markers/{id}/bookmark", web::post().to(toggle_marker_bookmark))
+                .route("/markers/{id}/view", web::post().to(add_marker_view))
+                .route("/markers/{id}/images", web::get().to(get_marker_images))
+                .route("/markers/{id}/images", web::post().to(add_marker_image))
+                .route("/markers/{id}/images/{image_id}", web::delete().to(delete_marker_image))
+                .route("/markers/{id}/images/{image_id}/primary", web::put().to(set_marker_primary_image))
+                .route("/markers/{id}/images/{image_id}/order", web::put().to(update_marker_image_order))
                 .route("/members/{id}/markers/created", web::get().to(get_member_created_markers))
                 .route("/members/{id}/markers/liked", web::get().to(get_member_liked_markers))
                 .route("/members/{id}/markers/bookmarked", web::get().to(get_member_bookmarked_markers))
@@ -2921,5 +2922,36 @@ async fn get_markers_feed(
                 "message": format!("피드 마커 조회 실패: {}", e)
             })))
         }
+    }
+}
+
+/// 마커 클러스터 조회
+async fn get_markers_cluster(
+    query: web::Query<MarkersQuery>,
+    pool: web::Data<PgPool>,
+    config: web::Data<Config>,
+) -> Result<HttpResponse> {
+    let db = Database { pool: pool.get_ref().clone() };
+    // 파라미터 파싱
+    let emotion_tags = query.emotion_tags.as_ref().map(|tags| {
+        tags.split(',').map(|tag| tag.trim().to_string()).filter(|tag| !tag.is_empty()).collect::<Vec<_>>()
+    });
+    let sort_by = query.sort_by.as_deref();
+    let sort_order = query.sort_order.as_deref();
+    let user_id = None; // JWT에서 추출하려면 여기서 처리
+    match db.get_markers_cluster(
+        query.lat, query.lng, query.lat_delta, query.lng_delta,
+        emotion_tags, query.min_likes, query.min_views,
+        sort_by, sort_order, query.limit, user_id
+    ).await {
+        Ok(clusters) => Ok(HttpResponse::Ok().json(serde_json::json!({
+            "success": true,
+            "data": clusters,
+            "count": clusters.len()
+        }))),
+        Err(e) => Ok(HttpResponse::InternalServerError().json(serde_json::json!({
+            "success": false,
+            "message": format!("마커 클러스터 조회 실패: {}", e)
+        }))),
     }
 }
