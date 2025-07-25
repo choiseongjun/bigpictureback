@@ -2005,6 +2005,49 @@ impl Database {
             clusters.entry(h3idx).or_default().push(marker);
         }
 
+        // 모든 마커 ID 수집
+        let all_marker_ids: Vec<i32> = clusters.values()
+            .flat_map(|marker_list| marker_list.iter().map(|m| m.id))
+            .collect();
+
+        // 비동기 병렬로 모든 마커의 이미지 조회
+        use futures::stream::{FuturesUnordered, StreamExt};
+        let image_futures: FuturesUnordered<_> = all_marker_ids.iter()
+            .map(|&marker_id| {
+                let db = &self.pool;
+                async move {
+                    let rows = sqlx::query(
+                        r#"
+                        SELECT id, marker_id, image_type, image_url, image_order, is_primary, created_at, updated_at
+                        FROM bigpicture.marker_images 
+                        WHERE marker_id = $1
+                        ORDER BY image_order ASC
+                        "#
+                    )
+                    .bind(marker_id)
+                    .fetch_all(db)
+                    .await
+                    .unwrap_or_default();
+
+                    let images: Vec<MarkerImage> = rows.iter().map(|row| MarkerImage {
+                        id: row.try_get("id").unwrap_or(0),
+                        marker_id: row.try_get("marker_id").unwrap_or(0),
+                        image_type: row.try_get("image_type").unwrap_or_default(),
+                        image_url: row.try_get("image_url").unwrap_or_default(),
+                        image_order: row.try_get("image_order").unwrap_or(0),
+                        is_primary: row.try_get("is_primary").unwrap_or(false),
+                        created_at: row.try_get("created_at").unwrap_or_else(|_| chrono::Utc::now()),
+                        updated_at: row.try_get("updated_at").unwrap_or_else(|_| chrono::Utc::now()),
+                    }).collect();
+
+                    (marker_id, images)
+                }
+            })
+            .collect();
+
+        let marker_images_map: std::collections::HashMap<i32, Vec<MarkerImage>> = 
+            image_futures.collect::<Vec<_>>().await.into_iter().collect();
+
         // 병렬 처리를 위한 클러스터 데이터 준비
         let cluster_data: Vec<_> = clusters.into_iter().collect();
         
@@ -2017,8 +2060,21 @@ impl Database {
                 let center_lng = sum_lng / count as f64;
                 let marker_ids: Vec<i32> = marker_list.iter().map(|m| m.id).collect();
 
-                // 병렬로 마커 JSON 변환
+                // 병렬로 마커 JSON 변환 (이미지 포함)
                 let markers: Vec<serde_json::Value> = marker_list.par_iter().map(|m| {
+                    let empty_vec = Vec::new();
+                    let images = marker_images_map.get(&m.id).unwrap_or(&empty_vec);
+                    let images_json: Vec<serde_json::Value> = images.iter().map(|img| serde_json::json!({
+                        "id": img.id,
+                        "markerId": img.marker_id,
+                        "imageType": img.image_type,
+                        "imageUrl": img.image_url,
+                        "imageOrder": img.image_order,
+                        "isPrimary": img.is_primary,
+                        "createdAt": img.created_at,
+                        "updatedAt": img.updated_at
+                    })).collect();
+
                     serde_json::json!({
                         "id": m.id,
                         "memberId": m.member_id,
@@ -2032,7 +2088,8 @@ impl Database {
                         "author": m.author,
                         "thumbnailImg": m.thumbnail_img,
                         "createdAt": m.created_at.to_rfc3339(),
-                        "updatedAt": m.updated_at.to_rfc3339()
+                        "updatedAt": m.updated_at.to_rfc3339(),
+                        "images": images_json
                     })
                 }).collect();
 
