@@ -1,0 +1,106 @@
+# 통합 마커 반응 API 테스트 명령어
+# 새로운 API: POST /api/markers/{id}/reaction
+
+# 1. 좋아요 추가 (활성화)
+curl -X POST "http://localhost:5500/api/markers/500019/reaction" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN" \
+  -d '{
+    "like_type": "like"
+  }'
+
+# 예상 응답:
+# {
+#   "success": true,
+#   "message": "좋아요 처리 완료",
+#   "likes": 1,
+#   "dislikes": 0,
+#   "is_liked": true,
+#   "is_disliked": false
+# }
+
+# 2. 같은 마커에 좋아요 다시 요청 (비활성화 - 토글)
+curl -X POST "http://localhost:5500/api/markers/500019/reaction" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN" \
+  -d '{
+    "like_type": "like"
+  }'
+
+# 예상 응답:
+# {
+#   "success": true,
+#   "message": "좋아요 처리 완료",
+#   "likes": 0,
+#   "dislikes": 0,
+#   "is_liked": false,
+#   "is_disliked": false
+# }
+
+# 3. 싫어요 추가 (활성화)
+curl -X POST "http://localhost:5500/api/markers/500019/reaction" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN" \
+  -d '{
+    "like_type": "dislike"
+  }'
+
+# 예상 응답:
+# {
+#   "success": true,
+#   "message": "싫어요 처리 완료",
+#   "likes": 0,
+#   "dislikes": 1,
+#   "is_liked": false,
+#   "is_disliked": true
+# }
+
+# 4. 좋아요로 변경 (기존 싫어요 제거하고 좋아요 추가)
+curl -X POST "http://localhost:5500/api/markers/500019/reaction" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN" \
+  -d '{
+    "like_type": "like"
+  }'
+
+# 예상 응답:
+# {
+#   "success": true,
+#   "message": "좋아요 처리 완료",
+#   "likes": 1,
+#   "dislikes": 0,
+#   "is_liked": true,
+#   "is_disliked": false
+# }
+
+# 5. 잘못된 like_type 요청 (에러)
+curl -X POST "http://localhost:5500/api/markers/500019/reaction" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN" \
+  -d '{
+    "like_type": "invalid_type"
+  }'
+
+# 예상 응답:
+# {
+#   "success": false,
+#   "message": "잘못된 like_type입니다. 'like' 또는 'dislike'를 사용하세요.",
+#   "likes": 0,
+#   "dislikes": 0,
+#   "is_liked": null,
+#   "is_disliked": null
+# }
+
+# 6. 인증 토큰 없이 요청 (에러)
+curl -X POST "http://localhost:5500/api/markers/500019/reaction" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "like_type": "like"
+  }'
+
+# API 동작 설명:
+# - 하나의 API 엔드포인트로 좋아요/싫어요를 모두 처리
+# - 요청 본문의 "like_type" 필드로 "like" 또는 "dislike" 지정
+# - 토글 기능: 기존에 같은 반응이 있으면 제거, 없으면 추가
+# - 다른 반응이 있으면 기존 반응을 제거하고 새로운 반응으로 변경
+# - 응답에는 현재 마커의 좋아요/싫어요 수와 사용자의 반응 상태 포함 

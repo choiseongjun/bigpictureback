@@ -510,6 +510,23 @@ impl Database {
         .await?;
         println!("✅ member_interests 테이블 생성 완료");
         
+        // member_markers 테이블 인덱스 생성 (기존 테이블 활용)
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_member_markers_member_id ON bigpicture.member_markers(member_id)")
+            .execute(pool)
+            .await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_member_markers_marker_id ON bigpicture.member_markers(marker_id)")
+            .execute(pool)
+            .await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_member_markers_interaction_type ON bigpicture.member_markers(interaction_type)")
+            .execute(pool)
+            .await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_member_markers_member_marker ON bigpicture.member_markers(member_id, marker_id)")
+            .execute(pool)
+            .await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_member_markers_created_at ON bigpicture.member_markers(created_at)")
+            .execute(pool)
+            .await?;
+        
         Ok(())
     }
     
@@ -1162,6 +1179,238 @@ impl Database {
         Ok(recs)
     }
 
+    /// member_markers 테이블을 사용한 좋아요/싫어요 토글
+    pub async fn toggle_like(
+        &self,
+        member_id: i64,
+        marker_id: i64,
+        like_type: &str, // "like" 또는 "dislike"
+    ) -> Result<(i32, i32)> { // (좋아요 수, 싫어요 수) 반환
+        let mut tx = self.pool.begin().await?;
+        
+        // interaction_type 매핑
+        let interaction_type = if like_type == "like" { "liked" } else { "disliked" };
+        
+        // 기존 좋아요/싫어요 확인
+        let existing = sqlx::query_as::<_, MemberMarker>(
+            r#"
+            SELECT * FROM bigpicture.member_markers 
+            WHERE member_id = $1 AND marker_id = $2 AND interaction_type = $3
+            "#
+        )
+        .bind(member_id)
+        .bind(marker_id)
+        .bind(interaction_type)
+        .fetch_optional(&mut *tx)
+        .await?;
+
+        if let Some(existing_like) = existing {
+            // 기존 좋아요/싫어요가 있으면 제거
+            sqlx::query(
+                "DELETE FROM bigpicture.member_markers WHERE id = $1"
+            )
+            .bind(existing_like.id)
+            .execute(&mut *tx)
+            .await?;
+
+            // 마커 카운트 감소
+            let update_query = match like_type {
+                "like" => "UPDATE bigpicture.markers SET likes = GREATEST(likes - 1, 0) WHERE id = $1",
+                "dislike" => "UPDATE bigpicture.markers SET dislikes = GREATEST(dislikes - 1, 0) WHERE id = $1",
+                _ => return Err(anyhow::anyhow!("Invalid like type")),
+            };
+            sqlx::query(update_query)
+                .bind(marker_id)
+                .execute(&mut *tx)
+                .await?;
+        } else {
+            // 새로운 좋아요/싫어요 추가
+            sqlx::query(
+                r#"
+                INSERT INTO bigpicture.member_markers
+                    (member_id, marker_id, interaction_type)
+                VALUES ($1, $2, $3)
+                "#
+            )
+            .bind(member_id)
+            .bind(marker_id)
+            .bind(interaction_type)
+            .execute(&mut *tx)
+            .await?;
+
+            // 마커 카운트 증가
+            let update_query = match like_type {
+                "like" => "UPDATE bigpicture.markers SET likes = likes + 1 WHERE id = $1",
+                "dislike" => "UPDATE bigpicture.markers SET dislikes = dislikes + 1 WHERE id = $1",
+                _ => return Err(anyhow::anyhow!("Invalid like type")),
+            };
+            sqlx::query(update_query)
+                .bind(marker_id)
+                .execute(&mut *tx)
+                .await?;
+        }
+
+        // 업데이트된 카운트 조회
+        let counts = sqlx::query_as::<_, (i32, i32)>(
+            "SELECT likes, dislikes FROM bigpicture.markers WHERE id = $1"
+        )
+        .bind(marker_id)
+        .fetch_one(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+        Ok(counts)
+    }
+
+    /// 사용자가 특정 마커에 좋아요/싫어요를 눌렀는지 확인
+    pub async fn get_user_like_status(
+        &self,
+        member_id: i64,
+        marker_id: i64,
+    ) -> Result<Option<String>> { // None, Some("like"), Some("dislike")
+        let like = sqlx::query_as::<_, MemberMarker>(
+            r#"
+            SELECT * FROM bigpicture.member_markers 
+            WHERE member_id = $1 AND marker_id = $2 AND interaction_type IN ('liked', 'disliked')
+            "#
+        )
+        .bind(member_id)
+        .bind(marker_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(like.map(|l| {
+            if l.interaction_type == "liked" { "like".to_string() } else { "dislike".to_string() }
+        }))
+    }
+
+    /// 마커의 좋아요/싫어요 목록 조회
+    pub async fn get_marker_likes(
+        &self,
+        marker_id: i64,
+        like_type: Option<&str>, // None이면 모든 타입, "like" 또는 "dislike"
+    ) -> Result<Vec<MemberMarker>> {
+        let interaction_type = like_type.map(|lt| {
+            if lt == "like" { "liked" } else { "disliked" }
+        });
+        
+        let query = if let Some(it) = interaction_type {
+            sqlx::query_as::<_, MemberMarker>(
+                r#"
+                SELECT * FROM bigpicture.member_markers 
+                WHERE marker_id = $1 AND interaction_type = $2
+                ORDER BY created_at DESC
+                "#
+            )
+            .bind(marker_id)
+            .bind(it)
+        } else {
+            sqlx::query_as::<_, MemberMarker>(
+                r#"
+                SELECT * FROM bigpicture.member_markers 
+                WHERE marker_id = $1 AND interaction_type IN ('liked', 'disliked')
+                ORDER BY created_at DESC
+                "#
+            )
+            .bind(marker_id)
+        };
+
+        let member_markers = query.fetch_all(&self.pool).await?;
+        Ok(member_markers)
+    }
+
+    /// 사용자가 좋아요/싫어요한 마커 목록 조회
+    pub async fn get_user_likes(
+        &self,
+        member_id: i64,
+        like_type: Option<&str>, // None이면 모든 타입, "like" 또는 "dislike"
+        limit: Option<i32>,
+    ) -> Result<Vec<MemberMarker>> {
+        let interaction_type = like_type.map(|lt| {
+            if lt == "like" { "liked" } else { "disliked" }
+        });
+        
+        let query = if let Some(it) = interaction_type {
+            sqlx::query_as::<_, MemberMarker>(
+                r#"
+                SELECT * FROM bigpicture.member_markers 
+                WHERE member_id = $1 AND interaction_type = $2
+                ORDER BY created_at DESC
+                LIMIT $3
+                "#
+            )
+            .bind(member_id)
+            .bind(it)
+            .bind(limit.unwrap_or(50))
+        } else {
+            sqlx::query_as::<_, MemberMarker>(
+                r#"
+                SELECT * FROM bigpicture.member_markers 
+                WHERE member_id = $1 AND interaction_type IN ('liked', 'disliked')
+                ORDER BY created_at DESC
+                LIMIT $2
+                "#
+            )
+            .bind(member_id)
+            .bind(limit.unwrap_or(50))
+        };
+
+        let member_markers = query.fetch_all(&self.pool).await?;
+        Ok(member_markers)
+    }
+
+    /// 좋아요/싫어요 통계 조회
+    pub async fn get_like_stats(
+        &self,
+        marker_id: Option<i64>, // None이면 전체 통계
+    ) -> Result<serde_json::Value> {
+        let stats = if let Some(mid) = marker_id {
+            // 특정 마커의 통계
+            let (total_likes, total_dislikes) = sqlx::query_as::<_, (i64, i64)>(
+                r#"
+                SELECT 
+                    COUNT(CASE WHEN interaction_type = 'liked' THEN 1 END) as total_likes,
+                    COUNT(CASE WHEN interaction_type = 'disliked' THEN 1 END) as total_dislikes
+                FROM bigpicture.member_markers 
+                WHERE marker_id = $1
+                "#
+            )
+            .bind(mid)
+            .fetch_one(&self.pool)
+            .await?;
+
+            serde_json::json!({
+                "marker_id": mid,
+                "total_likes": total_likes,
+                "total_dislikes": total_dislikes,
+                "total_reactions": total_likes + total_dislikes
+            })
+        } else {
+            // 전체 통계
+            let (total_likes, total_dislikes, total_markers) = sqlx::query_as::<_, (i64, i64, i64)>(
+                r#"
+                SELECT 
+                    COUNT(CASE WHEN interaction_type = 'liked' THEN 1 END) as total_likes,
+                    COUNT(CASE WHEN interaction_type = 'disliked' THEN 1 END) as total_dislikes,
+                    COUNT(DISTINCT marker_id) as total_markers
+                FROM bigpicture.member_markers
+                WHERE interaction_type IN ('liked', 'disliked')
+                "#
+            )
+            .fetch_one(&self.pool)
+            .await?;
+
+            serde_json::json!({
+                "total_likes": total_likes,
+                "total_dislikes": total_dislikes,
+                "total_reactions": total_likes + total_dislikes,
+                "total_markers_with_reactions": total_markers
+            })
+        };
+
+        Ok(stats)
+    }
+
     /// 소셜 로그인 회원 생성 (트랜잭션으로 처리)
     pub async fn create_social_member(
         &self,
@@ -1494,6 +1743,7 @@ impl Database {
         marker_id: i64,
         reaction_type: &str, // "like" 또는 "dislike"
     ) -> Result<(i32, i32)> { // (좋아요 수, 싫어요 수) 반환
+        info!("🔍 SQL 로깅 시작: toggle_marker_reaction - member_id: {}, marker_id: {}, reaction_type: {}", member_id, marker_id, reaction_type);
         let mut tx = self.pool.begin().await?;
         
         // 기존 반응 확인
@@ -1591,6 +1841,7 @@ impl Database {
         .await?;
 
         tx.commit().await?;
+        info!("✅ SQL 로깅 완료: toggle_marker_reaction - 최종 결과: likes={}, dislikes={}", counts.0, counts.1);
         Ok(counts)
     }
 
@@ -1910,6 +2161,7 @@ impl Database {
         sort_order: Option<&str>,
         limit: Option<i32>,
         user_id: Option<i64>,
+        zoom: Option<i32>, // zoom 추가
     ) -> Result<Vec<serde_json::Value>> {
         // 현재 화면보다 약간 더 넓은 영역을 조회해서 지도 이동 시 미리 로딩
         let buffer_factor = 1.2; // 20% 더 넓은 영역 조회
@@ -1972,17 +2224,28 @@ impl Database {
         }
 
         // 줌 레벨에 따른 클러스터링 조정
-        // 줌 레벨 15 이상에서는 클러스터링을 최소화해서 개별 마커 사진이 많이 보이도록
-        let precision = if lat_delta > 2.0 || lng_delta > 2.0 {
-            3  // 매우 큰 클러스터 (줌아웃)
-        } else if lat_delta > 0.5 || lng_delta > 0.5 {
-            4  // 중간 줌에서 적절한 클러스터링
-        } else if lat_delta > 0.1 || lng_delta > 0.1 {
-            5  // 줌 레벨 14에서 적절한 클러스터링
-        } else if lat_delta > 0.03 || lng_delta > 0.03 {
-            8  // 줌 레벨 15 이상에서 매우 세밀한 클러스터링 (개별 마커 많이 보임)
+        let precision = if let Some(z) = zoom {
+            if z <= 13 {
+                4 // 줌 13 이하에서는 큰 클러스터
+            } else if z == 14 {
+                5
+            } else if z == 15 {
+                8
+            } else {
+                9
+            }
         } else {
-            9  // 매우 줌인에서 최대 세밀한 클러스터링 (개별 마커 사진 많이 보임)
+            if lat_delta > 2.0 || lng_delta > 2.0 {
+                3
+            } else if lat_delta > 0.5 || lng_delta > 0.5 {
+                4
+            } else if lat_delta > 0.1 || lng_delta > 0.1 {
+                5
+            } else if lat_delta > 0.03 || lng_delta > 0.03 {
+                8
+            } else {
+                9
+            }
         };
         // precision이 9 이상이거나 lat_delta/lng_delta가 아주 작으면 클러스터링 없이 개별 마커로 분리
         if precision >= 9 || (lat_delta < 0.01 && lng_delta < 0.01) {
@@ -2425,4 +2688,6 @@ pub struct MemberInterest {
     pub interest_id: i32,
     pub interest_level: Option<i32>,
     pub created_at: chrono::DateTime<chrono::Utc>,
-} 
+}
+
+ 

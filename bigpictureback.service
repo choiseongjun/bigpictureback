@@ -1,0 +1,20 @@
+[Unit]
+Description=BigPicture Backend Service
+After=network.target
+
+[Service]
+Type=simple
+User=your-user
+WorkingDirectory=/path/to/your/app
+ExecStart=/path/to/your/app/target/release/bigpictureback
+Restart=always
+RestartSec=3
+Environment=RUST_LOG=info
+Environment=DATABASE_URL=your_database_url
+Environment=S3_BUCKET_NAME=your_bucket_name
+Environment=S3_REGION=your_region
+Environment=S3_ACCESS_KEY_ID=your_access_key
+Environment=S3_SECRET_ACCESS_KEY=your_secret_key
+
+[Install]
+WantedBy=multi-user.target 

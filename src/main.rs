@@ -18,6 +18,10 @@ use s3_service::S3Service;
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
+    // SQL 로깅을 위한 환경 변수 설정
+    unsafe {
+        std::env::set_var("RUST_LOG", "info,sqlx::query=debug");
+    }
     env_logger::init();
     
     // 설정 로드

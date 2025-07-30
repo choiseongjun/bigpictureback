@@ -240,9 +240,12 @@ pub fn setup_routes(config: &mut web::ServiceConfig) {
                 .route("/markers/cluster", web::get().to(get_markers_cluster))
                 .route("/markers/rank", web::get().to(get_markers_rank))
                 .route("/markers/{id}", web::get().to(get_marker_detail))
-                .route("/markers/{id}/like", web::post().to(toggle_marker_like))
-                .route("/markers/{id}/dislike", web::post().to(toggle_marker_dislike))
+                .route("/markers/{id}/reaction", web::post().to(toggle_marker_reaction))
                 .route("/markers/{id}/bookmark", web::post().to(toggle_marker_bookmark))
+                .route("/markers/{id}/likes/new", web::post().to(toggle_like_new))
+                .route("/markers/{id}/likes/status", web::get().to(get_like_status))
+                .route("/markers/{id}/likes", web::get().to(get_marker_likes))
+                .route("/likes/stats", web::get().to(get_like_stats))
                 .route("/markers/{id}/view", web::post().to(add_marker_view))
                 .route("/markers/{id}/images", web::get().to(get_marker_images))
                 .route("/markers/{id}/images", web::post().to(add_marker_image))
@@ -2289,60 +2292,56 @@ async fn get_marker_detail(
     }
 }
 
-/// 마커 좋아요 토글
-async fn toggle_marker_like(
+#[derive(Deserialize)]
+pub struct ToggleReactionRequest {
+    pub like_type: String, // "like" 또는 "dislike"
+}
+
+/// 마커 좋아요/싫어요 통합 토글
+async fn toggle_marker_reaction(
     db: web::Data<Database>,
     path: web::Path<i64>,
+    payload: web::Json<ToggleReactionRequest>,
     config: web::Data<Config>,
     req: actix_web::HttpRequest,
 ) -> Result<HttpResponse> {
     let marker_id = path.into_inner();
     let user_id = extract_user_id_from_token(&req, &config)?;
+    let like_type = &payload.like_type;
     
-    info!("👍 마커 좋아요 토글: 마커 {}, 유저 {}", marker_id, user_id);
+    info!("🚀 API 호출: POST /api/markers/{}/reaction - 유저: {}, 타입: {}", marker_id, user_id, like_type);
     
-    match db.toggle_marker_reaction(user_id, marker_id, "liked").await {
-        Ok((likes, dislikes)) => {
-            Ok(HttpResponse::Ok().json(MarkerReactionResponse {
-                success: true,
-                message: "좋아요 처리 완료".to_string(),
-                likes,
-                dislikes,
-                is_liked: Some(likes > 0),
-                is_disliked: Some(dislikes > 0),
-            }))
-        }
-        Err(e) => {
-            error!("❌ 마커 좋아요 처리 실패: {}", e);
-            Ok(HttpResponse::InternalServerError().json(MarkerReactionResponse {
+    // like_type을 member_markers 테이블의 interaction_type으로 매핑
+    let reaction_type = match like_type.as_str() {
+        "like" => "liked",
+        "dislike" => "disliked",
+        _ => {
+            return Ok(HttpResponse::BadRequest().json(MarkerReactionResponse {
                 success: false,
-                message: format!("좋아요 처리 실패: {}", e),
+                message: "잘못된 like_type입니다. 'like' 또는 'dislike'를 사용하세요.".to_string(),
                 likes: 0,
                 dislikes: 0,
                 is_liked: None,
                 is_disliked: None,
-            }))
+            }));
         }
-    }
-}
-
-/// 마커 싫어요 토글
-async fn toggle_marker_dislike(
-    db: web::Data<Database>,
-    path: web::Path<i64>,
-    config: web::Data<Config>,
-    req: actix_web::HttpRequest,
-) -> Result<HttpResponse> {
-    let marker_id = path.into_inner();
-    let user_id = extract_user_id_from_token(&req, &config)?;
+    };
     
-    info!("👎 마커 싫어요 토글: 마커 {}, 유저 {}", marker_id, user_id);
+    info!("🔄 마커 반응 토글: 마커 {}, 유저 {}, 타입 {}", marker_id, user_id, like_type);
+    info!("💾 데이터베이스 작업 시작: toggle_marker_reaction 호출");
     
-    match db.toggle_marker_reaction(user_id, marker_id, "disliked").await {
+    match db.toggle_marker_reaction(user_id, marker_id, reaction_type).await {
         Ok((likes, dislikes)) => {
+            info!("✅ 데이터베이스 작업 완료: toggle_marker_reaction 성공 - likes: {}, dislikes: {}", likes, dislikes);
+            let message = match like_type.as_str() {
+                "like" => "좋아요 처리 완료",
+                "dislike" => "싫어요 처리 완료",
+                _ => "반응 처리 완료",
+            };
+            
             Ok(HttpResponse::Ok().json(MarkerReactionResponse {
                 success: true,
-                message: "싫어요 처리 완료".to_string(),
+                message: message.to_string(),
                 likes,
                 dislikes,
                 is_liked: Some(likes > 0),
@@ -2350,10 +2349,11 @@ async fn toggle_marker_dislike(
             }))
         }
         Err(e) => {
-            error!("❌ 마커 싫어요 처리 실패: {}", e);
+            error!("❌ 데이터베이스 작업 실패: toggle_marker_reaction 실패 - {}", e);
+            error!("❌ 마커 반응 처리 실패: {}", e);
             Ok(HttpResponse::InternalServerError().json(MarkerReactionResponse {
                 success: false,
-                message: format!("싫어요 처리 실패: {}", e),
+                message: format!("반응 처리 실패: {}", e),
                 likes: 0,
                 dislikes: 0,
                 is_liked: None,
@@ -2954,7 +2954,7 @@ async fn get_markers_cluster(
     match db.get_markers_cluster(
         query.lat, query.lng, query.lat_delta, query.lng_delta,
         emotion_tags, query.min_likes, query.min_views,
-        sort_by, sort_order, query.limit, user_id
+        sort_by, sort_order, query.limit, user_id, query.zoom // zoom 추가
     ).await {
         Ok(mut clusters) => {
             // user_id가 있으면 각 마커에 isMine 추가
@@ -3090,6 +3090,172 @@ async fn get_markers_rank(
             Ok(HttpResponse::InternalServerError().json(serde_json::json!({
                 "success": false,
                 "message": format!("마커 순위 조회 실패: {}", e)
+            })))
+        }
+    }
+}
+
+// 새로운 좋아요 테이블을 사용하는 API 엔드포인트들
+
+#[derive(Deserialize)]
+pub struct ToggleLikeRequest {
+    pub like_type: String, // "like" 또는 "dislike"
+}
+
+/// 새로운 좋아요 테이블을 사용한 좋아요/싫어요 토글
+async fn toggle_like_new(
+    db: web::Data<Database>,
+    path: web::Path<i64>,
+    payload: web::Json<ToggleLikeRequest>,
+    config: web::Data<Config>,
+    req: actix_web::HttpRequest,
+) -> Result<HttpResponse> {
+    let marker_id = path.into_inner();
+    let like_type = &payload.like_type;
+    
+    // JWT 토큰에서 사용자 ID 추출
+    let user_id = match extract_user_id_from_token(&req, &config) {
+        Ok(uid) => uid,
+        Err(_) => {
+            return Ok(HttpResponse::Unauthorized().json(serde_json::json!({
+                "success": false,
+                "message": "로그인이 필요합니다."
+            })));
+        }
+    };
+
+    info!("👍 새로운 좋아요 토글 요청: 마커 {}, 사용자 {}, 타입 {}", marker_id, user_id, like_type);
+
+    match db.toggle_like(user_id, marker_id, like_type).await {
+        Ok((likes, dislikes)) => {
+            info!("✅ 좋아요 토글 성공: 좋아요 {}, 싫어요 {}", likes, dislikes);
+            Ok(HttpResponse::Ok().json(serde_json::json!({
+                "success": true,
+                "message": "좋아요 토글 성공",
+                "data": {
+                    "likes": likes,
+                    "dislikes": dislikes,
+                    "likeType": like_type
+                }
+            })))
+        }
+        Err(e) => {
+            error!("❌ 좋아요 토글 실패: {}", e);
+            Ok(HttpResponse::InternalServerError().json(serde_json::json!({
+                "success": false,
+                "message": format!("좋아요 토글 실패: {}", e)
+            })))
+        }
+    }
+}
+
+/// 사용자의 좋아요 상태 조회
+async fn get_like_status(
+    db: web::Data<Database>,
+    path: web::Path<i64>,
+    config: web::Data<Config>,
+    req: actix_web::HttpRequest,
+) -> Result<HttpResponse> {
+    let marker_id = path.into_inner();
+    
+    // JWT 토큰에서 사용자 ID 추출
+    let user_id = match extract_user_id_from_token(&req, &config) {
+        Ok(uid) => uid,
+        Err(_) => {
+            return Ok(HttpResponse::Unauthorized().json(serde_json::json!({
+                "success": false,
+                "message": "로그인이 필요합니다."
+            })));
+        }
+    };
+
+    info!("🔍 좋아요 상태 조회: 마커 {}, 사용자 {}", marker_id, user_id);
+
+    match db.get_user_like_status(user_id, marker_id).await {
+        Ok(like_status) => {
+            info!("✅ 좋아요 상태 조회 성공: {:?}", like_status);
+            Ok(HttpResponse::Ok().json(serde_json::json!({
+                "success": true,
+                "data": {
+                    "likeStatus": like_status,
+                    "isLiked": like_status.as_deref() == Some("like"),
+                    "isDisliked": like_status.as_deref() == Some("dislike")
+                }
+            })))
+        }
+        Err(e) => {
+            error!("❌ 좋아요 상태 조회 실패: {}", e);
+            Ok(HttpResponse::InternalServerError().json(serde_json::json!({
+                "success": false,
+                "message": format!("좋아요 상태 조회 실패: {}", e)
+            })))
+        }
+    }
+}
+
+/// 마커의 좋아요 목록 조회
+async fn get_marker_likes(
+    db: web::Data<Database>,
+    path: web::Path<i64>,
+    query: web::Query<std::collections::HashMap<String, String>>,
+) -> Result<HttpResponse> {
+    let marker_id = path.into_inner();
+    let like_type = query.get("type").map(|s| s.as_str()); // "like", "dislike", 또는 None (모든 타입)
+    
+    info!("📋 마커 좋아요 목록 조회: 마커 {}, 타입 {:?}", marker_id, like_type);
+
+    match db.get_marker_likes(marker_id, like_type).await {
+        Ok(likes) => {
+            info!("✅ 마커 좋아요 목록 조회 성공: {}개", likes.len());
+            let formatted_likes: Vec<serde_json::Value> = likes.iter()
+                .map(|like| serde_json::json!({
+                    "id": like.id,
+                    "memberId": like.member_id,
+                    "markerId": like.marker_id,
+                    "likeType": if like.interaction_type == "liked" { "like" } else { "dislike" },
+                    "createdAt": like.created_at,
+                    "updatedAt": like.updated_at
+                }))
+                .collect();
+            
+            Ok(HttpResponse::Ok().json(serde_json::json!({
+                "success": true,
+                "data": formatted_likes,
+                "count": likes.len()
+            })))
+        }
+        Err(e) => {
+            error!("❌ 마커 좋아요 목록 조회 실패: {}", e);
+            Ok(HttpResponse::InternalServerError().json(serde_json::json!({
+                "success": false,
+                "message": format!("마커 좋아요 목록 조회 실패: {}", e)
+            })))
+        }
+    }
+}
+
+/// 좋아요 통계 조회
+async fn get_like_stats(
+    db: web::Data<Database>,
+    query: web::Query<std::collections::HashMap<String, String>>,
+) -> Result<HttpResponse> {
+    let marker_id = query.get("marker_id").and_then(|s| s.parse::<i64>().ok());
+    
+    info!("📊 좋아요 통계 조회: 마커 ID {:?}", marker_id);
+
+    match db.get_like_stats(marker_id).await {
+        Ok(stats) => {
+            info!("✅ 좋아요 통계 조회 성공");
+            Ok(HttpResponse::Ok().json(serde_json::json!({
+                "success": true,
+                "data": stats
+            })))
+        }
+        Err(e) => {
+            error!("❌ 좋아요 통계 조회 실패: {}", e);
+            Ok(HttpResponse::InternalServerError().json(serde_json::json!({
+                "success": false,
+                "message": format!("좋아요 통계 조회 실패: {}", e)
             })))
         }
     }
