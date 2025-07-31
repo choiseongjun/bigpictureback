@@ -1,0 +1,92 @@
+# 마커 상세 조회 (조회수 자동 증가) API 예시
+
+## API 엔드포인트
+GET /api/markers/{id}/detail
+
+## 설명
+- 마커 상세 정보를 조회하면서 동시에 조회수를 자동으로 증가시킵니다
+- 로그인한 사용자만 조회수가 증가됩니다 (JWT 토큰 필요)
+- 기존 GET /api/markers/{id}와 동일한 응답 형식이지만 조회수가 증가됩니다
+
+## curl 예시
+
+### 1. 기본 마커 상세 조회 (조회수 증가)
+```bash
+curl -X GET "http://localhost:5500/api/markers/1/detail" \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN" \
+  -H "Content-Type: application/json"
+```
+
+### 2. 응답 예시
+```json
+{
+  "success": true,
+  "message": "마커 상세 조회 성공 (조회수 증가됨)",
+  "data": {
+    "marker": {
+      "id": 1,
+      "memberId": 123,
+      "latitude": 37.5665,
+      "longitude": 126.9780,
+      "emotionTag": "happy,delicious",
+      "emotionTagInput": "커피,맛집,데이트",
+      "emotion": "오늘은 정말 행복한 하루였다. 친구와 함께 맛있는 커피를 마시며 즐거운 시간을 보냈다.",
+      "description": "서울에서의 즐거운 하루",
+      "sharingOption": "public",
+      "likes": 5,
+      "dislikes": 0,
+      "views": 11,
+      "author": "사용자닉네임",
+      "thumbnailImg": "thumbnail.jpg",
+      "createdAt": "2024-01-01T12:00:00Z",
+      "updatedAt": "2024-01-01T12:00:00Z"
+    },
+    "images": [
+      {
+        "id": 1,
+        "markerId": 1,
+        "imageType": "thumbnail",
+        "imageUrl": "https://example.com/thumbnail.jpg",
+        "imageOrder": 1,
+        "isPrimary": true,
+        "createdAt": "2024-01-01T12:00:00Z",
+        "updatedAt": "2024-01-01T12:00:00Z"
+      }
+    ]
+  }
+}
+```
+
+### 3. 로그인하지 않은 사용자 (조회수 증가 안됨)
+```bash
+curl -X GET "http://localhost:5500/api/markers/1/detail" \
+  -H "Content-Type: application/json"
+```
+
+### 4. 존재하지 않는 마커
+```bash
+curl -X GET "http://localhost:5500/api/markers/999/detail" \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN" \
+  -H "Content-Type: application/json"
+```
+
+## 기존 API와의 차이점
+
+### 기존 API: GET /api/markers/{id}
+- 조회수 증가 없음
+- 단순히 마커 정보만 조회
+
+### 새로운 API: GET /api/markers/{id}/detail
+- 조회수 자동 증가 (로그인한 사용자만)
+- 마커 정보 + 이미지 정보 함께 조회
+- 비동기로 조회수 증가 (응답 속도에 영향 없음)
+
+## 사용 시나리오
+1. **상세 모달 열기**: 사용자가 마커를 클릭해서 상세 모달을 열 때
+2. **마커 상세 페이지**: 마커의 상세 정보를 보여주는 페이지에서
+3. **조회수 추적**: 마커의 인기도를 측정하기 위해
+
+## 주의사항
+- JWT 토큰이 유효해야 조회수가 증가됩니다
+- 같은 사용자가 같은 마커를 여러 번 조회해도 조회수는 한 번만 증가합니다 (데이터베이스에서 중복 체크)
+- 조회수 증가는 비동기로 처리되어 응답 속도에 영향을 주지 않습니다 

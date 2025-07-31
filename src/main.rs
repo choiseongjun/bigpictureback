@@ -10,6 +10,7 @@ mod config;
 mod s3_service;
 mod s3_routes;
 mod error_handler;
+mod emotions;
 
 use routes::setup_routes;
 use database::Database;
@@ -68,7 +69,7 @@ async fn main() -> std::io::Result<()> {
         }
     };
     
-    let server_address = config.server_address();
+    let _server_address = config.server_address();
     HttpServer::new(move || {
         // CORS 설정 - 모든 origin 허용 (localhost, IP 주소, 도메인 모두)
         let cors = Cors::default()

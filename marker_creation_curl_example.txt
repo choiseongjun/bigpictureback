@@ -1,0 +1,71 @@
+# 마커 생성 API curl 예시
+# 세 가지 감정 관련 필드 사용법
+
+# 1. 기본 마커 생성 (모든 감정 필드 포함)
+curl -X POST http://localhost:5500/api/markers \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN" \
+  -d '{
+    "latitude": 37.5665,
+    "longitude": 126.9780,
+    "emotion_tag": "happy,delicious,celebration",
+    "emotion_tag_input": "커피,맛집,데이트,서울타워",
+    "emotion": "오늘은 정말 특별한 날이었다. 서울타워에서 커피를 마시며 아름다운 서울의 야경을 감상했다. 연인과 함께한 이 순간이 평생 기억에 남을 것 같다.",
+    "description": "서울타워에서의 특별한 저녁",
+    "sharing_option": "public",
+    "thumbnail_img": "https://example.com/thumbnail.jpg",
+    "images": [
+      {
+        "image_url": "https://example.com/image1.jpg",
+        "order": 1
+      },
+      {
+        "image_url": "https://example.com/image2.jpg", 
+        "order": 2
+      }
+    ]
+  }'
+
+# 2. 간단한 마커 생성 (최소 필드만)
+curl -X POST http://localhost:5500/api/markers \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN" \
+  -d '{
+    "latitude": 37.5665,
+    "longitude": 126.9780,
+    "emotion_tag": "peaceful",
+    "description": "조용한 공원에서의 산책",
+    "sharing_option": "friends"
+  }'
+
+# 3. 감정 태그만 있는 마커 생성
+curl -X POST http://localhost:5500/api/markers \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN" \
+  -d '{
+    "latitude": 37.5665,
+    "longitude": 126.9780,
+    "emotion_tag": "sad,lonely",
+    "emotion_tag_input": "비,우산,혼자",
+    "description": "비 오는 날의 외로움",
+    "sharing_option": "private"
+  }'
+
+# 4. 자유로운 감정 설명이 있는 마커 생성
+curl -X POST http://localhost:5500/api/markers \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN" \
+  -d '{
+    "latitude": 37.5665,
+    "longitude": 126.9780,
+    "emotion_tag": "inspiration,achievement",
+    "emotion": "오랫동안 준비한 프로젝트가 마침내 완성되었다. 이 순간의 성취감과 영감이 나를 새로운 도전으로 이끌어준다.",
+    "description": "프로젝트 완성의 순간",
+    "sharing_option": "public"
+  }'
+
+# 필드 설명:
+# - emotion_tag: 미리 정의된 감정들 (happy, sad, angry, fear, peaceful, love, celebration, achievement, inspiration, delicious, music, beauty, memory, energy, tired, lonely, nostalgic, anxious, grateful, hopeful)
+# - emotion_tag_input: 사용자가 직접 입력한 감성 태그들 (예: "커피,맛집,데이트")
+# - emotion: 자유로운 감정/경험 설명 텍스트
+# - sharing_option: "public", "friends", "private" 중 선택 

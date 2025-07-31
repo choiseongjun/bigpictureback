@@ -14,7 +14,10 @@ struct MarkerClusterInfo {
     latitude: f64,
     longitude: f64,
     emotion_tag: String,
+    emotion_tag_input: String,
+    emotion: String,
     description: String,
+    sharing_option: String,
     likes: i32,
     dislikes: i32,
     views: i32,
@@ -171,7 +174,9 @@ impl Database {
                 member_id BIGINT REFERENCES bigpicture.members(id) ON DELETE CASCADE,
                 location GEOGRAPHY(POINT, 4326),
                 emotion_tag TEXT,
+                emotion TEXT,
                 description TEXT,
+                sharing_option VARCHAR(20) DEFAULT 'public' CHECK (sharing_option IN ('public', 'friends', 'private')),
                 likes INTEGER DEFAULT 0,
                 dislikes INTEGER DEFAULT 0,
                 views INTEGER DEFAULT 0,
@@ -185,6 +190,40 @@ impl Database {
         .execute(pool)
         .await?;
         println!("✅ markers 테이블 생성 완료");
+        
+                        // 기존 markers 테이블에 sharing_option 컬럼 추가 (마이그레이션)
+                println!("🔄 markers 테이블 마이그레이션 중...");
+                sqlx::query(
+                    r#"
+                    ALTER TABLE bigpicture.markers 
+                    ADD COLUMN IF NOT EXISTS sharing_option VARCHAR(20) DEFAULT 'public' CHECK (sharing_option IN ('public', 'friends', 'private'))
+                    "#
+                )
+                .execute(pool)
+                .await?;
+                println!("✅ markers 테이블 sharing_option 마이그레이션 완료");
+
+                // 기존 markers 테이블에 emotion 컬럼 추가 (마이그레이션)
+                sqlx::query(
+                    r#"
+                    ALTER TABLE bigpicture.markers 
+                    ADD COLUMN IF NOT EXISTS emotion TEXT
+                    "#
+                )
+                .execute(pool)
+                .await?;
+                println!("✅ markers 테이블 emotion 마이그레이션 완료");
+
+                // 기존 markers 테이블에 emotion_tag_input 컬럼 추가 (마이그레이션)
+                sqlx::query(
+                    r#"
+                    ALTER TABLE bigpicture.markers 
+                    ADD COLUMN IF NOT EXISTS emotion_tag_input TEXT
+                    "#
+                )
+                .execute(pool)
+                .await?;
+                println!("✅ markers 테이블 emotion_tag_input 마이그레이션 완료");
         
         // marker_images 테이블 생성 (마커와 이미지 연결)
         println!("📋 marker_images 테이블 생성 중...");
@@ -766,6 +805,7 @@ impl Database {
         sort_order: Option<&str>,
         limit: Option<i32>,
         user_id: Option<i64>, // 추가: 내 마커만 조회
+        current_user_id: Option<i64>, // 추가: 현재 로그인한 사용자 ID (공유 옵션 필터링용)
     ) -> Result<Vec<Marker>> {
         info!("🗄️ 데이터베이스 쿼리 시작:");
         
@@ -781,7 +821,7 @@ impl Database {
         let sort_col = sort_by.filter(|s| allowed_sort.contains(&s.to_lowercase().as_str())).unwrap_or("created_at");
         let order = sort_order.filter(|o| o.eq_ignore_ascii_case("asc") || o.eq_ignore_ascii_case("desc")).unwrap_or("desc");
         let mut query = format!(
-            "SELECT id, member_id, ST_AsText(location) as location, emotion_tag, description, likes, dislikes, views, author, thumbnail_img, created_at, updated_at
+            "SELECT id, member_id, ST_AsText(location) as location, emotion_tag, emotion, description, sharing_option, likes, dislikes, views, author, thumbnail_img, created_at, updated_at
              FROM bigpicture.markers 
              WHERE ST_Within(location::geometry, ST_MakeEnvelope({}, {}, {}, {}, 4326))",
             lng_min, lat_min, lng_max, lat_max
@@ -791,6 +831,19 @@ impl Database {
         if let Some(uid) = user_id {
             query.push_str(&format!(" AND member_id = {}", uid));
             info!("   - 내 마커만 필터: member_id = {}", uid);
+        } else {
+            // 공유 옵션에 따른 필터링
+            if let Some(current_user) = current_user_id {
+                query.push_str(&format!(
+                    " AND (sharing_option = 'public' OR (sharing_option = 'friends' AND member_id = {}) OR member_id = {})",
+                    current_user, current_user
+                ));
+                info!("   - 공유 옵션 필터: 현재 사용자 {}의 권한에 따라 필터링", current_user);
+            } else {
+                // 로그인하지 않은 사용자는 public 마커만 볼 수 있음
+                query.push_str(" AND sharing_option = 'public'");
+                info!("   - 공유 옵션 필터: 비로그인 사용자는 public 마커만 조회");
+            }
         }
         
         // 감성 태그 필터
@@ -912,7 +965,7 @@ impl Database {
         
         // 마커 목록 조회
         let markers_query = format!(
-            "SELECT id, member_id, ST_AsText(location) as location, emotion_tag, description, likes, dislikes, views, author, thumbnail_img, created_at, updated_at
+            "SELECT id, member_id, ST_AsText(location) as location, emotion_tag, emotion, description, sharing_option, likes, dislikes, views, author, thumbnail_img, created_at, updated_at
              FROM bigpicture.markers 
              {} 
              ORDER BY created_at DESC 
@@ -1711,25 +1764,31 @@ impl Database {
         latitude: f64,
         longitude: f64,
         emotion_tag: &str,
+        emotion_tag_input: Option<&str>, // 사용자가 입력한 감성태그들
+        emotion: Option<&str>, // 기존 emotion 필드 (호환성 유지)
         description: &str,
         author: &str,
         thumbnail_img: Option<&str>,
+        sharing_option: Option<&str>, // 추가: 공유 옵션
     ) -> Result<Marker> {
         let marker = sqlx::query_as::<_, Marker>(
             r#"
             INSERT INTO bigpicture.markers
-                (member_id, location, emotion_tag, description, author, thumbnail_img)
-            VALUES ($1, ST_SetSRID(ST_MakePoint($2, $3), 4326)::geography, $4, $5, $6, $7)
-            RETURNING id, member_id, ST_AsText(location) as location, emotion_tag, description, likes, dislikes, views, author, thumbnail_img, created_at, updated_at
+                (member_id, location, emotion_tag, emotion_tag_input, emotion, description, author, thumbnail_img, sharing_option)
+            VALUES ($1, ST_SetSRID(ST_MakePoint($2, $3), 4326)::geography, $4, $5, $6, $7, $8, $9, $10)
+            RETURNING id, member_id, ST_AsText(location) as location, emotion_tag, emotion_tag_input, emotion, description, sharing_option, likes, dislikes, views, author, thumbnail_img, created_at, updated_at
             "#
         )
         .bind(member_id)
         .bind(longitude) // PostGIS는 (longitude, latitude) 순서
         .bind(latitude)
         .bind(emotion_tag)
+        .bind(emotion_tag_input)
+        .bind(emotion)
         .bind(description)
         .bind(author)
         .bind(thumbnail_img)
+        .bind(sharing_option.unwrap_or("public"))
         .fetch_one(&self.pool)
         .await?;
 
@@ -1937,7 +1996,7 @@ impl Database {
     pub async fn get_member_created_markers(&self, member_id: i64, limit: Option<i32>) -> Result<Vec<Marker>> {
         let markers = sqlx::query_as::<_, Marker>(
             r#"
-            SELECT id, ST_AsText(location) as location, emotion_tag, description, likes, dislikes, views, author, thumbnail_img, member_id, created_at, updated_at 
+            SELECT id, ST_AsText(location) as location, emotion_tag, emotion, description, sharing_option, likes, dislikes, views, author, thumbnail_img, member_id, created_at, updated_at 
             FROM bigpicture.markers 
             WHERE member_id = $1 
             ORDER BY created_at DESC 
@@ -1955,7 +2014,7 @@ impl Database {
     pub async fn get_member_liked_markers(&self, member_id: i64, limit: Option<i32>) -> Result<Vec<Marker>> {
         let markers = sqlx::query_as::<_, Marker>(
             r#"
-            SELECT m.id, ST_AsText(m.location) as location, m.emotion_tag, m.description, m.likes, m.dislikes, m.views, m.author, m.thumbnail_img, m.member_id, m.created_at, m.updated_at 
+            SELECT m.id, ST_AsText(m.location) as location, m.emotion_tag, m.emotion, m.description, m.sharing_option, m.likes, m.dislikes, m.views, m.author, m.thumbnail_img, m.member_id, m.created_at, m.updated_at 
             FROM bigpicture.markers m
             INNER JOIN bigpicture.member_markers mm ON m.id = mm.marker_id
             WHERE mm.member_id = $1 AND mm.interaction_type = 'liked'
@@ -1974,7 +2033,7 @@ impl Database {
     pub async fn get_member_bookmarked_markers(&self, member_id: i64, limit: Option<i32>) -> Result<Vec<Marker>> {
         let markers = sqlx::query_as::<_, Marker>(
             r#"
-            SELECT m.id, ST_AsText(m.location) as location, m.emotion_tag, m.description, m.likes, m.dislikes, m.views, m.author, m.thumbnail_img, m.member_id, m.created_at, m.updated_at 
+            SELECT m.id, ST_AsText(m.location) as location, m.emotion_tag, m.emotion, m.description, m.sharing_option, m.likes, m.dislikes, m.views, m.author, m.thumbnail_img, m.member_id, m.created_at, m.updated_at 
             FROM bigpicture.markers m
             INNER JOIN bigpicture.member_markers mm ON m.id = mm.marker_id
             WHERE mm.member_id = $1 AND mm.interaction_type = 'bookmarked'
@@ -1992,7 +2051,7 @@ impl Database {
     /// 마커의 상세 정보 조회
     pub async fn get_marker_detail(&self, marker_id: i64) -> Result<Option<Marker>> {
         let marker = sqlx::query_as::<_, Marker>(
-            "SELECT id, member_id, ST_AsText(location) as location, emotion_tag, description, likes, dislikes, views, author, thumbnail_img, created_at, updated_at FROM bigpicture.markers WHERE id = $1"
+            "SELECT id, member_id, ST_AsText(location) as location, emotion_tag, emotion_tag_input, emotion, description, sharing_option, likes, dislikes, views, author, thumbnail_img, created_at, updated_at FROM bigpicture.markers WHERE id = $1"
         )
         .bind(marker_id)
         .fetch_optional(&self.pool)
@@ -2062,8 +2121,8 @@ impl Database {
             SELECT 
                 mm.id as mm_id, mm.member_id, mm.marker_id, mm.interaction_type, 
                 mm.created_at as mm_created_at, mm.updated_at as mm_updated_at,
-                m.id as m_id, m.member_id, ST_AsText(m.location) as location, m.emotion_tag, 
-                m.description, m.likes, m.dislikes, m.views, m.author, m.thumbnail_img,
+                m.id as m_id, m.member_id, ST_AsText(m.location) as location, m.emotion_tag, m.emotion,
+                m.description, m.sharing_option, m.likes, m.dislikes, m.views, m.author, m.thumbnail_img,
                 m.created_at as m_created_at, m.updated_at as m_updated_at
             FROM bigpicture.member_markers mm
             JOIN bigpicture.markers m ON mm.marker_id = m.id
@@ -2091,7 +2150,10 @@ impl Database {
                 member_id: row.get("member_id"),
                 location: row.get("location"),
                 emotion_tag: row.get("emotion_tag"),
+                emotion_tag_input: row.get("emotion_tag_input"),
+                emotion: row.get("emotion"),
                 description: row.get("description"),
+                sharing_option: row.get("sharing_option"),
                 likes: row.get("likes"),
                 dislikes: row.get("dislikes"),
                 views: row.get("views"),
@@ -2172,7 +2234,7 @@ impl Database {
 
         let mut query = format!(
             "SELECT m.id, m.member_id, ST_Y(m.location::geometry) as latitude, ST_X(m.location::geometry) as longitude, 
-                    m.emotion_tag, m.description, m.likes, m.dislikes, m.views, m.author, m.thumbnail_img, 
+                    m.emotion_tag, m.emotion_tag_input, m.emotion, m.description, m.sharing_option, m.likes, m.dislikes, m.views, m.author, m.thumbnail_img, 
                     m.created_at, m.updated_at
              FROM bigpicture.markers m
              WHERE ST_Within(m.location::geometry, ST_MakeEnvelope({}, {}, {}, {}, 4326))",
@@ -2212,7 +2274,10 @@ impl Database {
                 latitude: row.try_get("latitude").unwrap_or(0.0),
                 longitude: row.try_get("longitude").unwrap_or(0.0),
                 emotion_tag: row.try_get("emotion_tag").unwrap_or_default(),
+                emotion_tag_input: row.try_get("emotion_tag_input").unwrap_or_default(),
+                emotion: row.try_get("emotion").unwrap_or_default(),
                 description: row.try_get("description").unwrap_or_default(),
+                sharing_option: row.try_get("sharing_option").unwrap_or_default(),
                 likes: row.try_get("likes").unwrap_or(0),
                 dislikes: row.try_get("dislikes").unwrap_or(0),
                 views: row.try_get("views").unwrap_or(0),
@@ -2309,7 +2374,10 @@ impl Database {
                         "latitude": m.latitude,
                         "longitude": m.longitude,
                         "emotionTag": m.emotion_tag,
+                        "emotionTagInput": m.emotion_tag_input,
+                        "emotion": m.emotion,
                         "description": m.description,
+                        "sharingOption": m.sharing_option,
                         "likes": m.likes,
                         "dislikes": m.dislikes,
                         "views": m.views,
@@ -2407,7 +2475,10 @@ impl Database {
                         "latitude": m.latitude,
                         "longitude": m.longitude,
                         "emotionTag": m.emotion_tag,
+                        "emotionTagInput": m.emotion_tag_input,
+                        "emotion": m.emotion,
                         "description": m.description,
+                        "sharingOption": m.sharing_option,
                         "likes": m.likes,
                         "dislikes": m.dislikes,
                         "views": m.views,
@@ -2447,7 +2518,7 @@ impl Database {
         user_id: Option<i64>,
     ) -> Result<Vec<Marker>> {
         let mut query = String::from(
-            "SELECT id, member_id, location, emotion_tag, description, likes, dislikes, views, author, thumbnail_img, created_at, updated_at
+            "SELECT id, member_id, location, emotion_tag, emotion_tag_input, emotion, description, sharing_option, likes, dislikes, views, author, thumbnail_img, created_at, updated_at
              FROM bigpicture.markers WHERE 1=1"
         );
         if let Some(tags) = &emotion_tags {
@@ -2483,7 +2554,10 @@ impl Database {
                 member_id: row.try_get("member_id").ok(),
                 location: row.try_get("location").ok(),
                 emotion_tag: row.try_get("emotion_tag").ok(),
+                emotion_tag_input: row.try_get("emotion_tag_input").ok(),
+                emotion: row.try_get("emotion").ok(),
                 description: row.try_get("description").ok(),
+                sharing_option: row.try_get("sharing_option").ok(),
                 likes: row.try_get("likes").unwrap_or(0),
                 dislikes: row.try_get("dislikes").unwrap_or(0),
                 views: row.try_get("views").unwrap_or(0),
@@ -2553,8 +2627,11 @@ pub struct Marker {
     pub id: i32,
     pub member_id: Option<i64>, // 마커를 생성한 사용자 ID
     pub location: Option<String>, // PostGIS geography 타입 (WKT 형식)
-    pub emotion_tag: Option<String>,
+    pub emotion_tag: Option<String>, // 선택된 감정들을 문자열로 전송 (예: "happy,sad,angry")
+    pub emotion_tag_input: Option<String>, // 사용자가 입력한 감성태그들 (예: "커피,맛집,데이트")
+    pub emotion: Option<String>, // 기존 emotion 필드 (호환성 유지)
     pub description: Option<String>,
+    pub sharing_option: Option<String>, // public, friends, private
     pub likes: i32,
     pub dislikes: i32,
     pub views: i32,

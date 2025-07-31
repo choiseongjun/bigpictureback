@@ -17,6 +17,7 @@ use crate::config::Config;
 use crate::s3_service::S3Service;
 use crate::s3_routes::{upload_image_s3, upload_circular_thumbnail_s3_internal};
 use crate::error_handler::ErrorHandler;
+use crate::emotions::get_all_emotions;
 
 // 구글 ID 토큰 페이로드 구조체
 #[derive(Debug, Serialize, Deserialize)]
@@ -127,8 +128,11 @@ pub struct GoogleIdTokenRequest {
 pub struct CreateMarkerRequest {
     pub latitude: f64,
     pub longitude: f64,
-    pub emotion_tag: String,
+    pub emotion_tag: String, // 선택된 감정들을 문자열로 전송 (예: "happy,sad,angry")
+    pub emotion_tag_input: Option<String>, // 사용자가 입력한 감성태그들 (예: "커피,맛집,데이트")
+    pub emotion: Option<String>, // 자유로운 감정/경험 설명 텍스트
     pub description: String,
+    pub sharing_option: Option<String>, // public, friends, private
     pub thumbnail_img: Option<String>,
     pub images: Option<Vec<CreateMarkerImageRequest>>,
 }
@@ -240,12 +244,14 @@ pub fn setup_routes(config: &mut web::ServiceConfig) {
                 .route("/markers/cluster", web::get().to(get_markers_cluster))
                 .route("/markers/rank", web::get().to(get_markers_rank))
                 .route("/markers/{id}", web::get().to(get_marker_detail))
+                .route("/markers/{id}/detail", web::get().to(get_marker_detail_with_view))
                 .route("/markers/{id}/reaction", web::post().to(toggle_marker_reaction))
                 .route("/markers/{id}/bookmark", web::post().to(toggle_marker_bookmark))
                 .route("/markers/{id}/likes/new", web::post().to(toggle_like_new))
                 .route("/markers/{id}/likes/status", web::get().to(get_like_status))
                 .route("/markers/{id}/likes", web::get().to(get_marker_likes))
                 .route("/likes/stats", web::get().to(get_like_stats))
+                .route("/emotions", web::get().to(get_emotions))
                 .route("/markers/{id}/view", web::post().to(add_marker_view))
                 .route("/markers/{id}/images", web::get().to(get_marker_images))
                 .route("/markers/{id}/images", web::post().to(add_marker_image))
@@ -280,6 +286,9 @@ pub fn setup_routes(config: &mut web::ServiceConfig) {
                 ))
                 .route("/auth/google-id-token", web::post().to(
                     |db, payload, config| google_id_token_login(db, payload, config)
+                ))
+                .route("/auth/profile", web::get().to(
+                    |db, config, req| verify_profile(db, config, req)
                 ))
                 .service(
                     web::scope("/images")
@@ -383,9 +392,16 @@ async fn get_markers(
 
     // 내 마커만 조회 옵션 처리
     let mut user_id: Option<i64> = None;
+    let mut current_user_id: Option<i64> = None;
+    
+    // 토큰에서 현재 사용자 ID 추출 (공유 옵션 필터링용)
+    if let Ok(uid) = extract_user_id_from_token(&req, &config) {
+        current_user_id = Some(uid);
+    }
+    
     if query.my.unwrap_or(false) {
-        // 토큰에서 user_id 추출
-        if let Ok(uid) = extract_user_id_from_token(&req, &config) {
+        // 내 마커만 조회하는 경우
+        if let Some(uid) = current_user_id {
             user_id = Some(uid);
         } else {
             return Ok(HttpResponse::Unauthorized().json(serde_json::json!({
@@ -406,7 +422,8 @@ async fn get_markers(
         sort_by,
         sort_order,
         query.limit,
-        user_id, // 추가: user_id 전달
+        user_id, // 내 마커만 조회할 때 사용
+        current_user_id, // 공유 옵션 필터링용
     ).await {
         Ok(markers) => {
             info!("✅ 마커 조회 성공: {}개 마커 반환", markers.len());
@@ -1605,6 +1622,104 @@ async fn get_me(
             "message": format!("회원 조회 실패: {}", e)
         }))),
     }
+}
+
+/// 프로필 검증 전용 함수
+async fn verify_profile(
+    db: web::Data<Database>,
+    config: web::Data<Config>,
+    req: actix_web::HttpRequest,
+) -> Result<HttpResponse> {
+    info!("🔐 프로필 검증 요청");
+    
+    let auth_header = req.headers().get("Authorization").and_then(|h| h.to_str().ok());
+    if auth_header.is_none() || !auth_header.unwrap().starts_with("Bearer ") {
+        info!("❌ 인증 헤더 없음 또는 잘못된 형식");
+        return Ok(ErrorHandler::unauthorized(
+            "No Bearer token",
+            Some("Authorization 헤더가 없거나 Bearer 형식이 아닙니다")
+        ));
+    }
+    
+    let token = &auth_header.unwrap()[7..];
+    let validation = Validation::default();
+    
+    let claims = match decode::<Claims>(
+        token,
+        &DecodingKey::from_secret(config.jwt_secret.as_bytes()),
+        &validation,
+    ) {
+        Ok(data) => {
+            info!("✅ JWT 토큰 검증 성공");
+            data.claims
+        }
+        Err(e) => {
+            info!("❌ JWT 토큰 검증 실패: {}", e);
+            return Ok(ErrorHandler::unauthorized(
+                "Invalid token",
+                Some(&format!("토큰 검증 실패: {}", e))
+            ));
+        }
+    };
+    
+    let user_id: i64 = match claims.sub.parse() {
+        Ok(id) => {
+            info!("✅ 사용자 ID 파싱 성공: {}", id);
+            id
+        }
+        Err(_) => {
+            info!("❌ 사용자 ID 파싱 실패: {}", claims.sub);
+            return Ok(ErrorHandler::unauthorized(
+                "Invalid user id in token",
+                Some(&format!("토큰의 사용자 ID 파싱 실패: {}", claims.sub))
+            ));
+        }
+    };
+    
+    match db.get_member_by_id(user_id).await {
+        Ok(Some(member)) => {
+            info!("✅ 프로필 검증 성공: 사용자 {} ({})", member.nickname, member.email);
+            Ok(HttpResponse::Ok().json(serde_json::json!({
+                "success": true,
+                "message": "프로필 검증 성공",
+                "data": {
+                    "user": member_to_camelcase_json(&member),
+                    "token": {
+                        "valid": true,
+                        "exp": claims.exp,
+                        "user_id": user_id,
+                        "email": claims.email
+                    }
+                }
+            })))
+        }
+        Ok(None) => {
+            info!("❌ 사용자를 찾을 수 없음: ID {}", user_id);
+            Ok(HttpResponse::NotFound().json(serde_json::json!({
+                "success": false,
+                "message": "회원이 존재하지 않습니다.",
+                "data": {
+                    "token": {
+                        "valid": false,
+                        "reason": "user_not_found"
+                    }
+                }
+            })))
+        }
+        Err(e) => {
+            error!("❌ 데이터베이스 조회 실패: {}", e);
+            Ok(HttpResponse::InternalServerError().json(serde_json::json!({
+                "success": false,
+                "message": format!("회원 조회 실패: {}", e),
+                "data": {
+                    "token": {
+                        "valid": false,
+                        "reason": "database_error"
+                    }
+                }
+            })))
+        }
+    }
 } 
 
 /// 구글 ID 토큰 검증 (간소화된 버전)
@@ -2104,7 +2219,10 @@ fn marker_to_camelcase_json(marker: &crate::database::Marker) -> serde_json::Val
         "latitude": latitude,
         "longitude": longitude,
         "emotionTag": marker.emotion_tag,
+        "emotionTagInput": marker.emotion_tag_input,
+        "emotion": marker.emotion,
         "description": marker.description,
+        "sharingOption": marker.sharing_option,
         "likes": marker.likes,
         "dislikes": marker.dislikes,
         "views": marker.views,
@@ -2168,15 +2286,18 @@ async fn create_marker(
         }
     }
     
-    match db.create_marker(
-        user_id,
-        input.latitude,
-        input.longitude,
-        &input.emotion_tag,
-        &input.description,
-        &user.nickname, // 실제 사용자 닉네임 사용
-        input.thumbnail_img.as_deref(),
-    ).await {
+            match db.create_marker(
+            user_id,
+            input.latitude,
+            input.longitude,
+            &input.emotion_tag,
+            input.emotion_tag_input.as_deref(), // 사용자가 입력한 감성태그들
+            input.emotion.as_deref(), // 자유로운 감정/경험 설명 텍스트
+            &input.description,
+            &user.nickname, // 실제 사용자 닉네임 사용
+            input.thumbnail_img.as_deref(),
+            input.sharing_option.as_deref(), // 공유 옵션 추가
+        ).await {
         Ok(marker) => {
             info!("✅ 마커 생성 성공: ID {}, 작성자 {}", marker.id, user.nickname);
             
@@ -2276,6 +2397,79 @@ async fn get_marker_detail(
             Ok(HttpResponse::Ok().json(MarkerResponse {
                 success: true,
                 message: "마커 상세 조회 성공".to_string(),
+                data: Some(marker_data),
+            }))
+        }
+        Ok(None) => {
+            Ok(ErrorHandler::not_found("마커를 찾을 수 없습니다"))
+        }
+        Err(e) => {
+            error!("❌ 마커 상세 조회 실패: {}", e);
+            Ok(ErrorHandler::internal_server_error(
+                "마커 상세 조회 실패",
+                Some(&format!("데이터베이스 오류: {}", e))
+            ))
+        }
+    }
+}
+
+/// 마커 상세 조회 (조회수 증가 포함)
+async fn get_marker_detail_with_view(
+    db: web::Data<Database>,
+    path: web::Path<i64>,
+    config: web::Data<Config>,
+    req: actix_web::HttpRequest,
+) -> Result<HttpResponse> {
+    let marker_id = path.into_inner();
+    
+    info!("📋 마커 상세 조회 (조회수 증가): 마커 {}", marker_id);
+    
+    // 먼저 마커 정보 조회
+    match db.get_marker_detail(marker_id).await {
+        Ok(Some(marker)) => {
+            // 마커 이미지 정보도 함께 조회
+            let images = match db.get_marker_images(marker_id as i32).await {
+                Ok(images) => images,
+                Err(e) => {
+                    warn!("⚠️ 마커 이미지 조회 실패: {}", e);
+                    vec![]
+                }
+            };
+            
+            let formatted_images: Vec<serde_json::Value> = images.iter()
+                .map(|image| serde_json::json!({
+                    "id": image.id,
+                    "markerId": image.marker_id,
+                    "imageType": image.image_type,
+                    "imageUrl": image.image_url,
+                    "imageOrder": image.image_order,
+                    "isPrimary": image.is_primary,
+                    "createdAt": image.created_at,
+                    "updatedAt": image.updated_at
+                }))
+                .collect();
+            
+            let marker_data = serde_json::json!({
+                "marker": marker_to_camelcase_json(&marker),
+                "images": formatted_images
+            });
+            
+            // 조회수 증가 (로그인한 사용자인 경우에만)
+            if let Ok(user_id) = extract_user_id_from_token(&req, &config) {
+                // 비동기로 조회수 증가 (응답에 영향 주지 않도록)
+                let db_clone = db.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = db_clone.add_marker_view(user_id, marker_id).await {
+                        error!("❌ 마커 조회수 증가 실패: {}", e);
+                    } else {
+                        info!("👁️ 마커 조회수 증가 완료: 마커 {}, 유저 {}", marker_id, user_id);
+                    }
+                });
+            }
+            
+            Ok(HttpResponse::Ok().json(MarkerResponse {
+                success: true,
+                message: "마커 상세 조회 성공 (조회수 증가됨)".to_string(),
                 data: Some(marker_data),
             }))
         }
@@ -3259,4 +3453,13 @@ async fn get_like_stats(
             })))
         }
     }
+}
+
+/// 감정 태그 목록 반환
+async fn get_emotions() -> Result<HttpResponse> {
+    let emotions = get_all_emotions();
+    Ok(HttpResponse::Ok().json(serde_json::json!({
+        "success": true,
+        "data": emotions
+    })))
 }
